@@ -1,0 +1,920 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Zhou Ruoyu and He Yun
+# AGPL-3.0 Section 7 terms: ../../ADDITIONAL_TERMS.md
+
+import json
+import os
+import re
+import time
+import math
+from email.utils import parsedate_to_datetime
+from collections import ChainMap
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any
+
+import requests
+
+from .config import load_project_env
+
+load_project_env()
+
+_LANGUAGE_ENV = ContextVar('ocv_language_environment', default=None)
+
+
+@contextmanager
+def language_environment(values):
+    """Request/thread-local routing; never expose pool tokens through os.environ."""
+    token = _LANGUAGE_ENV.set(dict(values))
+    try:
+        yield
+    finally:
+        _LANGUAGE_ENV.reset(token)
+
+
+def _language_env():
+    return ChainMap(_LANGUAGE_ENV.get() or {}, os.environ)
+
+
+def _language_getenv(key, default=''):
+    return _language_env().get(key, default)
+
+
+DEFAULT_GEMINI_MODEL = "google/gemini-3.1-flash-lite-preview"
+DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+# No third-party relay is selected for a fresh installation. Existing users
+# keep their explicitly saved GEMINI_API_BASE unchanged.
+DEFAULT_OPENAI_COMPATIBLE_BASE_URL = ""
+RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
+
+# Legacy provider names below are model families exposed by an already
+# configured OpenAI-compatible relay, so they share one base URL and key.
+# Providers explicitly suffixed with ``_official`` keep independent official
+# credentials. ``runninghub`` remains as a hidden legacy alias only.
+LANGUAGE_PROVIDER_OPTIONS: dict[str, dict[str, Any]] = {
+    "gemini": {
+        "label": "Google Gemini",
+        "family": "gemini",
+        "family_label": "Google Gemini",
+        "source": "relay",
+        "key_env": "GEMINI_API_KEY",
+        "base_env": "GEMINI_API_BASE",
+        "model_env": "GEMINI_MODEL",
+        "default_base": DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        "default_model": DEFAULT_GEMINI_MODEL,
+        "protocol": "openai",
+        "models": [
+            {"value": "google/gemini-3.1-flash-lite-preview", "label": "Gemini 3.1 Flash-Lite（推荐）"},
+            {"value": "google/gemini-3.6-flash", "label": "Gemini 3.6 Flash"},
+            {"value": "google/gemini-3.5-flash-lite", "label": "Gemini 3.5 Flash-Lite（省钱）"},
+            {"value": "google/gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview（高质量）"},
+        ],
+    },
+    "runninghub": {
+        "label": "自定义兼容接口",
+        "key_env": "GEMINI_API_KEY",
+        "base_env": "GEMINI_API_BASE",
+        "model_env": "GEMINI_MODEL",
+        "default_base": DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        "default_model": DEFAULT_GEMINI_MODEL,
+        "protocol": "openai",
+        "models": [],
+        "allow_custom_model": True,
+        "hidden": True,
+        "family": "gemini",
+        "family_label": "Google Gemini",
+        "source": "relay",
+    },
+    "gemini_official": {
+        "label": "Google Gemini 官方 API",
+        "family": "gemini",
+        "family_label": "Google Gemini",
+        "source": "official",
+        "key_env": "GOOGLE_API_KEY",
+        "base_env": "GOOGLE_GEMINI_API_BASE",
+        "model_env": "GOOGLE_GEMINI_MODEL",
+        "default_base": DEFAULT_GEMINI_BASE_URL,
+        "default_model": "gemini-3.7-flash",
+        "protocol": "google",
+        "models": [
+            {"value": "gemini-3.7-flash", "label": "Gemini 3.7 Flash（推荐）"},
+            {"value": "gemini-3.5-flash", "label": "Gemini 3.5 Flash"},
+        ],
+        "allow_custom_model": True,
+    },
+    "anthropic": {
+        "label": "Anthropic Claude",
+        "family": "anthropic",
+        "family_label": "Anthropic Claude",
+        "source": "relay",
+        "key_env": "GEMINI_API_KEY",
+        "base_env": "GEMINI_API_BASE",
+        "model_env": "ANTHROPIC_MODEL",
+        "default_base": DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        "default_model": "anthropic/claude-sonnet-5",
+        "protocol": "openai",
+        "models": [
+            {"value": "anthropic/claude-sonnet-5", "label": "Claude Sonnet 5（推荐）"},
+            {"value": "anthropic/claude-opus-5", "label": "Claude Opus 5（高质量）"},
+            {"value": "anthropic/claude-haiku-4.5", "label": "Claude Haiku 4.5（省钱）"},
+        ],
+    },
+    "anthropic_official": {
+        "label": "Anthropic Claude 官方 API",
+        "family": "anthropic",
+        "family_label": "Anthropic Claude",
+        "source": "official",
+        "key_env": "ANTHROPIC_API_KEY",
+        "base_env": "ANTHROPIC_API_BASE",
+        "model_env": "ANTHROPIC_OFFICIAL_MODEL",
+        "default_base": "https://api.anthropic.com/v1",
+        "default_model": "claude-sonnet-5",
+        "protocol": "anthropic",
+        "models": [
+            {"value": "claude-sonnet-5", "label": "Claude Sonnet 5（推荐）"},
+            {"value": "claude-opus-5", "label": "Claude Opus 5（高质量）"},
+            {"value": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5（省钱）"},
+        ],
+        "allow_custom_model": True,
+    },
+    "deepseek": {
+        "label": "DeepSeek（三方兼容节点）",
+        "family": "deepseek",
+        "family_label": "DeepSeek",
+        "source": "relay",
+        "key_env": "GEMINI_API_KEY",
+        "base_env": "GEMINI_API_BASE",
+        "model_env": "DEEPSEEK_MODEL",
+        "default_base": DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        "default_model": "deepseek/deepseek-v4-flash",
+        "protocol": "openai",
+        "models": [
+            {"value": "deepseek/deepseek-v4-flash", "label": "DeepSeek V4 Flash（推荐）"},
+            {"value": "deepseek/deepseek-v4-pro", "label": "DeepSeek V4 Pro（高质量）"},
+        ],
+    },
+    "deepseek_official": {
+        "label": "DeepSeek 官方 API",
+        "family": "deepseek",
+        "family_label": "DeepSeek",
+        "source": "official",
+        "key_env": "DEEPSEEK_API_KEY",
+        "base_env": "DEEPSEEK_API_BASE",
+        "model_env": "DEEPSEEK_OFFICIAL_MODEL",
+        "default_base": "https://api.deepseek.com",
+        "default_model": "deepseek-v4-flash",
+        "protocol": "openai",
+        "models": [
+            {"value": "deepseek-v4-flash", "label": "DeepSeek V4 Flash（推荐）"},
+            {"value": "deepseek-v4-pro", "label": "DeepSeek V4 Pro（高质量）"},
+        ],
+    },
+    "openai": {
+        "label": "OpenAI GPT",
+        "family": "openai",
+        "family_label": "OpenAI GPT",
+        "source": "relay",
+        "key_env": "GEMINI_API_KEY",
+        "base_env": "GEMINI_API_BASE",
+        "model_env": "OPENAI_MODEL",
+        "default_base": DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        "default_model": "openai/gpt-5.6-terra",
+        "protocol": "openai",
+        "models": [
+            {"value": "openai/gpt-5.6-terra", "label": "GPT-5.6 Terra（推荐）"},
+            {"value": "openai/gpt-5.6-sol", "label": "GPT-5.6 Sol（高质量）"},
+            {"value": "openai/gpt-5.6-luna", "label": "GPT-5.6 Luna（省钱）"},
+            {"value": "openai/gpt-5.4-mini", "label": "GPT-5.4 mini（兼顾速度）"},
+        ],
+    },
+    "openai_official": {
+        "label": "OpenAI GPT 官方 API",
+        "family": "openai",
+        "family_label": "OpenAI GPT",
+        "source": "official",
+        "key_env": "OPENAI_API_KEY",
+        "base_env": "OPENAI_API_BASE",
+        "model_env": "OPENAI_OFFICIAL_MODEL",
+        "default_base": "https://api.openai.com/v1",
+        "default_model": "gpt-5.6-terra",
+        "protocol": "openai",
+        "models": [
+            {"value": "gpt-5.6-terra", "label": "GPT-5.6 Terra（推荐）"},
+            {"value": "gpt-5.6-sol", "label": "GPT-5.6 Sol（高质量）"},
+            {"value": "gpt-5.6-luna", "label": "GPT-5.6 Luna（省钱）"},
+            {"value": "gpt-5.4-mini", "label": "GPT-5.4 mini（兼顾速度）"},
+        ],
+        "allow_custom_model": True,
+    },
+    "qwen": {
+        "label": "阿里云 Qwen",
+        "family": "qwen",
+        "family_label": "阿里云 Qwen",
+        "source": "relay",
+        "key_env": "GEMINI_API_KEY",
+        "base_env": "GEMINI_API_BASE",
+        "model_env": "QWEN_MODEL",
+        "default_base": DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        "default_model": "qwen/qwen3.7-plus",
+        "protocol": "openai",
+        "models": [
+            {"value": "qwen/qwen3.8-max", "label": "Qwen3.8 Max（高质量）"},
+            {"value": "qwen/qwen3.7-plus", "label": "Qwen3.7 Plus（推荐）"},
+            {"value": "qwen/qwen3.6-flash", "label": "Qwen3.6 Flash（省钱）"},
+        ],
+    },
+    "qwen_official": {
+        "label": "阿里云 Qwen 官方 API",
+        "family": "qwen",
+        "family_label": "阿里云 Qwen",
+        "source": "official",
+        "key_env": "QWEN_API_KEY",
+        "base_env": "QWEN_API_BASE",
+        "model_env": "QWEN_OFFICIAL_MODEL",
+        "default_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "default_model": "qwen3.7-plus",
+        "protocol": "openai",
+        "models": [
+            {"value": "qwen3.8-max", "label": "Qwen3.8 Max（高质量）"},
+            {"value": "qwen3.7-plus", "label": "Qwen3.7 Plus（推荐）"},
+            {"value": "qwen3.6-flash", "label": "Qwen3.6 Flash（省钱）"},
+        ],
+        "allow_custom_model": True,
+    },
+    "kimi": {
+        "label": "Kimi（当前节点未开放）",
+        "family": "kimi",
+        "family_label": "Kimi",
+        "source": "relay",
+        "key_env": "GEMINI_API_KEY",
+        "base_env": "GEMINI_API_BASE",
+        "model_env": "MOONSHOT_MODEL",
+        "default_base": DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        "default_model": "kimi-k3",
+        "protocol": "openai",
+        "models": [],
+        "disabled": True,
+        "disabled_reason": "当前三方节点的 /models 列表尚未开放 Kimi",
+    },
+    "kimi_official": {
+        "label": "Kimi 官方 API",
+        "family": "kimi",
+        "family_label": "Kimi",
+        "source": "official",
+        "key_env": "MOONSHOT_API_KEY",
+        "base_env": "MOONSHOT_API_BASE",
+        "model_env": "MOONSHOT_OFFICIAL_MODEL",
+        "default_base": "https://api.moonshot.cn/v1",
+        "default_model": "kimi-k3",
+        "protocol": "openai",
+        "models": [
+            {"value": "kimi-k3", "label": "Kimi K3（推荐）"},
+            {"value": "kimi-k2.7-code-highspeed", "label": "Kimi K2.7 Code Highspeed"},
+            {"value": "kimi-k2.6", "label": "Kimi K2.6"},
+        ],
+        "allow_custom_model": True,
+    },
+    "glm": {
+        "label": "智谱 GLM",
+        "family": "glm",
+        "family_label": "智谱 GLM",
+        "source": "relay",
+        "key_env": "GEMINI_API_KEY",
+        "base_env": "GEMINI_API_BASE",
+        "model_env": "ZAI_MODEL",
+        "default_base": DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        "default_model": "glm-5.2",
+        "protocol": "openai",
+        "models": [
+            {"value": "glm-5.2", "label": "GLM-5.2（推荐）"},
+            {"value": "glm-5-turbo", "label": "GLM-5 Turbo（高速）"},
+            {"value": "glm-5.1", "label": "GLM-5.1（兼顾成本）"},
+        ],
+    },
+    "glm_official": {
+        "label": "智谱 GLM 官方 API",
+        "family": "glm",
+        "family_label": "智谱 GLM",
+        "source": "official",
+        "key_env": "ZAI_API_KEY",
+        "base_env": "ZAI_API_BASE",
+        "model_env": "ZAI_OFFICIAL_MODEL",
+        "default_base": "https://open.bigmodel.cn/api/paas/v4",
+        "default_model": "glm-5.2",
+        "protocol": "openai",
+        "models": [
+            {"value": "glm-5.2", "label": "GLM-5.2（推荐）"},
+            {"value": "glm-5-turbo", "label": "GLM-5 Turbo（高速）"},
+            {"value": "glm-5.1", "label": "GLM-5.1（兼顾成本）"},
+        ],
+        "allow_custom_model": True,
+    },
+    "custom": {
+        "label": "自定义兼容接口（高级）",
+        "family": "custom",
+        "family_label": "自定义",
+        "source": "custom",
+        "key_env": "CUSTOM_LLM_API_KEY",
+        "base_env": "CUSTOM_LLM_API_BASE",
+        "model_env": "CUSTOM_LLM_MODEL",
+        "default_base": "",
+        "default_model": "",
+        "protocol": "openai",
+        "models": [],
+        "allow_custom_model": True,
+        "optional_key": True,
+    },
+}
+
+
+class GeminiError(RuntimeError):
+    pass
+
+
+class GeminiOutputTruncated(GeminiError):
+    """The provider stopped because the completion token budget was exhausted."""
+
+
+def gemini_configured() -> bool:
+    return language_provider_configured()
+
+
+def _provider() -> str:
+    selected = _language_getenv("LANGUAGE_PROVIDER", "").strip().lower()
+    if selected in LANGUAGE_PROVIDER_OPTIONS:
+        return "gemini" if selected == "runninghub" else selected
+    legacy = _language_getenv("GEMINI_PROVIDER", "").strip().lower()
+    if not legacy:
+        return "gemini_official"
+    if legacy in {"google", "gemini"}:
+        return "gemini"
+    if legacy in {"openai", "openai_compatible", "runninghub"}:
+        return "gemini"
+    return legacy if legacy in LANGUAGE_PROVIDER_OPTIONS else "gemini_official"
+
+
+def language_provider_config(provider: str | None = None) -> dict[str, Any]:
+    """Return the selected provider config, while accepting legacy relays."""
+    provider_name = (provider or _provider()).strip().lower()
+    if provider_name in LANGUAGE_PROVIDER_OPTIONS:
+        return LANGUAGE_PROVIDER_OPTIONS[provider_name]
+    return {
+        "label": "OpenAI compatible",
+        "key_env": "GEMINI_API_KEY",
+        "base_env": "GEMINI_API_BASE",
+        "model_env": "GEMINI_MODEL",
+        "default_base": DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        "default_model": DEFAULT_GEMINI_MODEL,
+        "protocol": "openai",
+        "models": [],
+        "allow_custom_model": True,
+    }
+
+
+def language_provider_models(provider: str | None = None) -> list[dict[str, str]]:
+    config = language_provider_config(provider)
+    return [
+        {"value": str(item.get("value") or ""), "label": str(item.get("label") or item.get("value") or "")}
+        for item in config.get("models", [])
+        if str(item.get("value") or "").strip()
+    ]
+
+
+def language_model(provider: str | None = None) -> str:
+    config = language_provider_config(provider)
+    return _language_getenv(config["model_env"], config["default_model"]).strip() or config["default_model"]
+
+
+def language_base_url(provider: str | None = None) -> str:
+    """Resolve an endpoint without allowing official credentials to cross vendors."""
+    config = language_provider_config(provider)
+    if config.get("source") == "official":
+        return str(config["default_base"]).rstrip("/")
+    return _language_getenv(config["base_env"], config["default_base"]).strip().rstrip("/")
+
+
+def language_model_allowed(provider: str, model: str) -> bool:
+    config = language_provider_config(provider)
+    if config.get("allow_custom_model"):
+        return bool(model.strip())
+    candidate = model.strip()
+    configured = _language_getenv(config["model_env"], "").strip()
+    return candidate == configured or candidate in {item["value"] for item in language_provider_models(provider)}
+
+
+def language_provider_configured(provider: str | None = None, values: Any | None = None) -> bool:
+    config = language_provider_config(provider)
+    source = values if values is not None else _language_env()
+    if config.get("optional_key"):
+        return bool(
+            str(source.get(config["base_env"], "")).strip()
+            and str(source.get(config["model_env"], "")).strip()
+        )
+    if config.get("source") == "relay":
+        return bool(
+            str(source.get(config["key_env"], "")).strip()
+            and str(source.get(config["base_env"], "")).strip()
+        )
+    return bool(str(source.get(config["key_env"], "")).strip())
+
+
+def language_provider_status() -> dict[str, Any]:
+    selected = _provider()
+    options = []
+    for name, config in LANGUAGE_PROVIDER_OPTIONS.items():
+        if config.get("hidden"):
+            continue
+        options.append({
+            "value": name,
+            "label": config["label"],
+            "family": config.get("family", name),
+            "family_label": config.get("family_label", config["label"]),
+            "source": config.get("source", "relay"),
+            "configured": language_provider_configured(name) and not bool(config.get("disabled")),
+            "selected_model": language_model(name),
+            "models": language_provider_models(name),
+            "allow_custom_model": bool(config.get("allow_custom_model")),
+            "disabled": bool(config.get("disabled")),
+            "disabled_reason": str(config.get("disabled_reason") or ""),
+        })
+    config = language_provider_config(selected)
+    return {
+        "provider": selected,
+        "provider_label": config["label"],
+        "configured": language_provider_configured(selected),
+        "model": language_model(selected),
+        "providers": options,
+    }
+
+
+def _gemini_models(provider: str | None = None) -> list[str]:
+    config = language_provider_config(provider)
+    primary = language_model(provider)
+    fallback_raw = _language_getenv("GEMINI_FALLBACK_MODELS", "").strip()
+    models = [primary]
+    if fallback_raw and (provider or _provider()) in {"gemini", "runninghub"}:
+        models.extend(re.split(r"[,;\s]+", fallback_raw))
+    unique: list[str] = []
+    for model in models:
+        model = model.strip()
+        if model and model not in unique:
+            unique.append(model)
+    return unique
+
+
+def _gemini_retry_count() -> int:
+    raw_value = os.getenv("GEMINI_RETRY_COUNT", "3").strip()
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        return 3
+
+
+def _gemini_retry_delay(attempt: int) -> float:
+    raw_value = os.getenv("GEMINI_RETRY_DELAY_SECONDS", "3").strip()
+    try:
+        base_delay = max(0.5, float(raw_value))
+    except ValueError:
+        base_delay = 3.0
+    return min(30.0, base_delay * (2 ** max(0, attempt - 1)))
+
+
+def _gemini_timeout() -> tuple[float, float]:
+    try:
+        connect = max(1.0, float(os.getenv("GEMINI_CONNECT_TIMEOUT_SECONDS", "10")))
+    except ValueError:
+        connect = 10.0
+    try:
+        read = max(connect, float(os.getenv("GEMINI_READ_TIMEOUT_SECONDS", "120")))
+    except ValueError:
+        read = 120.0
+    return connect, read
+
+
+def _compatible_retry_delay(response, attempt, remaining):
+    """Honor server cooldowns without exceeding a bounded retry window."""
+    delay = _gemini_retry_delay(attempt)
+    if response.status_code == 429:
+        delay = max(delay, 15.0 * (2 ** (attempt - 1)))
+    raw = response.headers.get('Retry-After')
+    if isinstance(raw, str):
+        try:
+            parsed = float(raw)
+        except ValueError:
+            try:
+                parsed = parsedate_to_datetime(raw).timestamp() - time.time()
+            except (ValueError, TypeError, OverflowError):
+                parsed = None
+        if parsed is not None and math.isfinite(parsed):
+            delay = max(0.0, parsed)
+    return delay if delay <= remaining else None
+
+
+def _extract_error_message(response: requests.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        return response.text[:300]
+    if not isinstance(data, dict):
+        return str(data)[:300]
+    error = data.get("error")
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("status")
+        if message:
+            return str(message)
+    message = data.get("message") or data.get("errorMessage")
+    return str(message) if message else str(data)[:300]
+
+
+def _read_chat_stream(response, *, label, max_tokens):
+    """Consume exactly one completed SSE answer; never return a partial draft."""
+    fragments, event = [], []
+    finish = None
+    size = 0
+
+    def events():
+        # Explicit UTF-8 avoids requests' ISO-8859-1 default for text/event-stream.
+        response.encoding = 'utf-8'
+        for line in response.iter_lines(decode_unicode=True):
+            if isinstance(line, bytes):
+                line = line.decode('utf-8')
+            if not line:
+                if event:
+                    yield '\n'.join(event)
+                    event.clear()
+            elif line.startswith('data:'):
+                event.append(line[5:].lstrip(' '))
+        if event:
+            yield '\n'.join(event)
+
+    try:
+        for raw in events():
+            if raw.strip() == '[DONE]':
+                if finish != 'stop' or not ''.join(fragments).strip():
+                    detail = ('未返回正文' if not ''.join(fragments).strip()
+                              else f'已收到 {size} 字符，但缺少正常结束标记')
+                    raise GeminiError(f'{label} 流式响应没有完整结束的文本（{detail}）；未采用部分结果，也未自动重复请求')
+                return ''.join(fragments).strip()
+            try:
+                data = json.loads(raw)
+                if not isinstance(data, dict) or data.get('error'):
+                    raise ValueError('invalid envelope')
+                choices = data.get('choices', [])
+                if not isinstance(choices, list):
+                    raise ValueError('invalid choices')
+                for choice in choices:
+                    if not isinstance(choice, dict) or choice.get('index', 0) != 0:
+                        raise ValueError('unexpected choice')
+                    delta = choice.get('delta') or {}
+                    if not isinstance(delta, dict) or delta.get('tool_calls') or delta.get('refusal'):
+                        raise ValueError('unexpected delta')
+                    content = delta.get('content')
+                    if content is not None:
+                        if not isinstance(content, str) or finish is not None:
+                            raise ValueError('invalid content')
+                        size += len(content)
+                        if size > 200000:
+                            raise ValueError('output too large')
+                        fragments.append(content)
+                    reason = choice.get('finish_reason')
+                    if reason == 'length':
+                        raise GeminiOutputTruncated(f'{label} 输出被长度上限截断（max_tokens={max_tokens}）')
+                    if reason is not None:
+                        if reason != 'stop' or finish is not None:
+                            raise ValueError('unexpected finish')
+                        finish = reason
+            except (ValueError, TypeError, KeyError) as exc:
+                raise GeminiError(f'{label} 流式响应格式无效；未采用部分结果，也未自动重复请求') from exc
+        raise GeminiError(f'{label} 流式响应意外结束；未采用部分结果，也未自动重复请求')
+    except requests.RequestException as exc:
+        raise GeminiError(f'{label} 流式连接中断（{type(exc).__name__}）；未采用部分结果，也未自动重复请求') from exc
+    finally:
+        response.close()
+
+
+def _generate_openai_compatible_text(
+    *,
+    api_key: str,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    response_mime_type: str | None,
+    max_output_tokens: int | None,
+    provider: str | None = None,
+    json_root: str | None = None,
+    image_data: dict[str, str] | list[dict[str, str]] | None = None,
+    stream: bool = False,
+) -> str:
+    config = language_provider_config(provider)
+    base_url = language_base_url(provider)
+    extra_body: dict[str, Any] = {}
+    reasoning_effort = os.getenv("GEMINI_REASONING_EFFORT", "none").strip()
+    allow_reasoning_effort = True
+    if provider == "deepseek_official":
+        # DeepSeek's official Chat Completions API enables thinking by default.
+        # OCV's planning stages need predictable JSON and token usage, so make
+        # non-thinking explicit unless an advanced environment override asks
+        # for a reasoning effort.
+        extra_body["thinking"] = {
+            "type": "enabled" if reasoning_effort and reasoning_effort.lower() != "none" else "disabled"
+        }
+    elif provider == "custom":
+        custom_thinking_mode = os.getenv("CUSTOM_LLM_THINKING_MODE", "follow").strip().lower()
+        if custom_thinking_mode in {"disabled", "enabled"}:
+            extra_body["thinking"] = {"type": custom_thinking_mode}
+        if custom_thinking_mode == "disabled":
+            allow_reasoning_effort = False
+    if allow_reasoning_effort and reasoning_effort and reasoning_effort.lower() != "none":
+        extra_body["reasoning_effort"] = reasoning_effort
+    # OpenAI's json_object mode requires a top-level object. Agent 2, however,
+    # intentionally returns a top-level array. Enabling json_object for that
+    # request makes GPT collapse a multi-item storyboard into one object.
+    if response_mime_type == "application/json" and json_root != "array":
+        extra_body["response_format"] = {"type": "json_object"}
+
+    errors: list[str] = []
+    response: requests.Response | None = None
+    for model in _gemini_models(provider):
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt.strip()},
+                {"role": "user", "content": ([{"type": "text", "text": user_prompt.strip()}] + [{"type": "image_url", "image_url": {"url": f"data:{item['mime_type']};base64,{item['data']}"}} for item in _reference_images(image_data)] if image_data else user_prompt.strip())},
+            ],
+            "max_tokens": max_output_tokens or int(os.getenv("GEMINI_MAX_TOKENS", "4096")),
+            "temperature": temperature,
+            "top_p": float(os.getenv("GEMINI_TOP_P", "1")),
+            "presence_penalty": float(os.getenv("GEMINI_PRESENCE_PENALTY", "0")),
+            "frequency_penalty": float(os.getenv("GEMINI_FREQUENCY_PENALTY", "0")),
+        }
+        # Legacy built-in relays may accept this wrapper; official and
+        # user-configured OpenAI-compatible endpoints expect request-root fields.
+        if config.get("source") in {"official", "custom"} or provider in {"deepseek", "openai", "qwen", "kimi", "glm"}:
+            payload.update(extra_body)
+        elif extra_body:
+            payload["extra_body"] = extra_body
+
+        url = f"{base_url}/chat/completions"
+        if stream:
+            payload['stream'] = True
+        response = None
+        max_attempts = min(3, _gemini_retry_count())
+        retry_started = time.monotonic()
+        waited = 0.0
+        for attempt in range(1, max_attempts + 1):
+            try:
+                headers = {"Content-Type": "application/json"}
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=_gemini_timeout(),
+                    **({'stream': True} if stream else {}),
+                )
+            except requests.RequestException as exc:
+                raise GeminiError(f"{config['label']} 请求失败（{type(exc).__name__}）；结果未确认，未自动重复请求") from exc
+
+            if response.ok:
+                if stream:
+                    return _read_chat_stream(response, label=config['label'], max_tokens=payload['max_tokens'])
+                break
+
+            message = _extract_error_message(response)
+            if stream:
+                response.close()
+            errors.append(f"{model}: HTTP {response.status_code} {message}")
+            if response.status_code in RETRYABLE_STATUS_CODES and attempt < max_attempts:
+                remaining = 60.0 - max(waited, time.monotonic() - retry_started)
+                delay = _compatible_retry_delay(response, attempt, remaining)
+                if delay is not None and remaining > 0:
+                    time.sleep(delay)
+                    waited += delay
+                    continue
+            if response.status_code == 429:
+                raise GeminiError(f"{config['label']} 调用失败（限流重试已达上限，未切换模型）: " + '；'.join(errors[-3:]))
+            break
+        if response is not None and response.ok:
+            break
+    else:
+        response = None
+
+    if response is None or not response.ok:
+        raise GeminiError(f"{config['label']} 调用失败: " + "；".join(errors[-6:]))
+
+    data = response.json()
+    try:
+        choice = data["choices"][0]
+        finish_reason = str(choice.get("finish_reason") or "").strip().lower()
+        message = choice["message"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise GeminiError(f"无法解析 {config['label']} 响应: {data}") from exc
+    if finish_reason == "length":
+        usage = data.get("usage") if isinstance(data, dict) else None
+        raise GeminiOutputTruncated(
+            f"{config['label']} 输出被长度上限截断（max_tokens={payload['max_tokens']}，usage={usage}）"
+        )
+    text = str(message.get("content") or "").strip() if isinstance(message, dict) else ""
+    if not text:
+        raise GeminiError(f"{config['label']} 返回为空: {data}")
+    return text
+
+
+def _generate_anthropic_text(
+    *,
+    api_key: str,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_output_tokens: int | None,
+    provider: str,
+    image_data: dict[str, str] | list[dict[str, str]] | None = None,
+) -> str:
+    config = language_provider_config(provider)
+    base_url = language_base_url(provider)
+    errors: list[str] = []
+    response: requests.Response | None = None
+    payload: dict[str, Any] = {}
+    for model in _gemini_models(provider):
+        payload = {
+            "model": model,
+            "system": system_prompt.strip(),
+            "messages": [{"role": "user", "content": ([{"type": "image", "source": {"type": "base64", "media_type": item['mime_type'], "data": item['data']}} for item in _reference_images(image_data)] + [{"type": "text", "text": user_prompt.strip()}] if image_data else user_prompt.strip())}],
+            "max_tokens": max_output_tokens or int(os.getenv("GEMINI_MAX_TOKENS", "4096")),
+            "temperature": temperature,
+        }
+        response = None
+        for attempt in range(1, _gemini_retry_count() + 1):
+            try:
+                response = requests.post(
+                    f"{base_url}/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=_gemini_timeout(),
+                )
+            except requests.RequestException as exc:
+                errors.append(f"{model}: 网络异常 {type(exc).__name__}")
+                if attempt < _gemini_retry_count():
+                    time.sleep(_gemini_retry_delay(attempt))
+                    continue
+                break
+            if response.ok:
+                break
+            errors.append(f"{model}: HTTP {response.status_code} {_extract_error_message(response)}")
+            if response.status_code in RETRYABLE_STATUS_CODES and attempt < _gemini_retry_count():
+                time.sleep(_gemini_retry_delay(attempt))
+                continue
+            break
+        if response is not None and response.ok:
+            break
+    else:
+        response = None
+
+    if response is None or not response.ok:
+        raise GeminiError("Anthropic 调用失败: " + "；".join(errors[-6:]))
+    data = response.json()
+    if str(data.get("stop_reason") or "").lower() == "max_tokens":
+        raise GeminiOutputTruncated(
+            f"Anthropic 输出被长度上限截断（max_tokens={payload['max_tokens']}，usage={data.get('usage')}）"
+        )
+    content = data.get("content") if isinstance(data, dict) else None
+    text = "".join(
+        str(block.get("text") or "")
+        for block in content or []
+        if isinstance(block, dict) and block.get("type") == "text"
+    ).strip()
+    if not text:
+        raise GeminiError(f"无法解析 Anthropic 响应: {data}")
+    return text
+
+
+def _reference_images(image_data):
+    """Preserve the order shared by the prompt labels and provider image parts."""
+    if image_data is None:
+        return []
+    images = image_data if isinstance(image_data, list) else [image_data]
+    if len(images) > 9 or any(not isinstance(item, dict) or not item.get('mime_type') or not item.get('data') for item in images):
+        raise ValueError('图片输入必须是最多 9 张有效的有序图像')
+    return images
+
+
+def generate_gemini_text(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.3,
+    response_mime_type: str | None = None,
+    max_output_tokens: int | None = None,
+    json_root: str | None = None,
+    image_data: dict[str, str] | list[dict[str, str]] | None = None,
+    stream: bool = False,
+) -> str:
+    provider = _provider()
+    config = language_provider_config(provider)
+    api_key = _language_getenv(config["key_env"], "").strip()
+    if not api_key and not config.get("optional_key"):
+        raise GeminiError(f"未配置 {config['key_env']}")
+    if config.get("optional_key") and not language_provider_configured(provider):
+        raise GeminiError(
+            f"自定义语言接口未配置完整，请在 .env 中填写 {config['base_env']} 和 {config['model_env']}"
+        )
+
+    if config["protocol"] == "openai":
+        return _generate_openai_compatible_text(
+            api_key=api_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=temperature,
+            response_mime_type=response_mime_type,
+            max_output_tokens=max_output_tokens,
+            provider=provider,
+            json_root=json_root,
+            image_data=image_data,
+            stream=stream,
+        )
+    if config["protocol"] == "anthropic":
+        return _generate_anthropic_text(
+            api_key=api_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            provider=provider,
+            image_data=image_data,
+        )
+    base_url = language_base_url(provider)
+    payload: dict[str, Any] = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": f"{system_prompt.strip()}\n\n{user_prompt.strip()}"}],
+            }
+        ],
+        "generationConfig": {"temperature": temperature},
+    }
+    if max_output_tokens:
+        payload["generationConfig"]["maxOutputTokens"] = max_output_tokens
+    for item in _reference_images(image_data):
+        payload["contents"][0]["parts"].append({"inlineData": {"mimeType": item["mime_type"], "data": item["data"]}})
+    if response_mime_type:
+        payload["generationConfig"]["responseMimeType"] = response_mime_type
+
+    errors: list[str] = []
+    response: requests.Response | None = None
+    for model in _gemini_models(provider):
+        response = None
+        url = f"{base_url}/models/{model}:generateContent"
+        for attempt in range(1, _gemini_retry_count() + 1):
+            try:
+                response = requests.post(
+                    url,
+                    headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=_gemini_timeout(),
+                )
+            except requests.RequestException as exc:
+                errors.append(f"{model}: 网络异常 {type(exc).__name__}")
+                if attempt < _gemini_retry_count():
+                    time.sleep(_gemini_retry_delay(attempt))
+                    continue
+                break
+
+            if response.ok:
+                break
+
+            message = _extract_error_message(response)
+            errors.append(f"{model}: HTTP {response.status_code} {message}")
+            if response.status_code in RETRYABLE_STATUS_CODES and attempt < _gemini_retry_count():
+                time.sleep(_gemini_retry_delay(attempt))
+                continue
+            break
+        if response is not None and response.ok:
+            break
+    else:
+        response = None
+
+    if response is None or not response.ok:
+        raise GeminiError("Gemini 调用失败: " + "；".join(errors[-6:]))
+
+    data = response.json()
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(part.get("text", "") for part in parts).strip()
+    except (KeyError, IndexError, TypeError) as exc:
+        raise GeminiError(f"无法解析 Gemini 响应: {data}") from exc
+    if not text:
+        raise GeminiError(f"Gemini 返回为空: {data}")
+    return text
+
+
+def parse_json_response(text: str) -> Any:
+    cleaned = text.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", cleaned, re.S | re.I)
+    if fence:
+        cleaned = fence.group(1).strip()
+    return json.loads(cleaned)
