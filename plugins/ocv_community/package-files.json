@@ -142,7 +142,7 @@
   "extension_src/frontend/src/workbenchFeedback.js": "50a7f95407c10c6e6d1ccc31deda412dcd02e2899983802aac24d2f002798417",
   "LICENSE": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
   "NOTICE": "24832789c481ccedec16f8aa058ff7411c4c9c3eec6dbf0630f979d4ae533620",
-  "plugin.json": "d5b00f6ff05b9227be108969441d9ffa4b78f9df07e0494f3ec880a2fcd5dc62",
+  "plugin.json": "9f3130bddb5fd55e3ccce401d8ffefa7e43a3cc31796a2a7fe0a02028c0c81e6",
   "README.md": "72e540edd2e08d8ad1678749b87838457a1f6a2a2e90fc0a8ab76ff152babbd8",
   "THIRD_PARTY_NOTICES.md": "6a10a3da7c7bad49c410d5cf69a836d546da78627ca27aaaff07d5003bb1fc45",
   "tools/prepare_qwen3_models.py": "d00bf8d01dfd9c86addb6b2f2e6687bcdfb247542be777e03facf42d706727f3",

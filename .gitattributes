@@ -1,4 +1,8 @@
-* text=auto
+* text=auto eol=lf
+*.webp binary
+*.jpg binary
+*.jpeg binary
+*.png binary
 *.patch text eol=lf
 *.py text eol=lf
 *.json text eol=lf

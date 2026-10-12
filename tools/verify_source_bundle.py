@@ -27,7 +27,9 @@ def verify(official):
     additions = [item for item in index['files'] if item['kind']=='addon']
     changes = [item for item in index['files'] if item['kind']=='host_patch']
     for item in additions + index.get('assets',[]):
-        assert sha((ROOT/item['package']).read_bytes())==item['sha256'], item['source']
+        content=(ROOT/item['package']).read_bytes()
+        if item in additions:content=content.replace(b'\r\n',b'\n')
+        assert sha(content)==item['sha256'], item['source']
     compiled = 0
     for path in (ROOT/'plugins/ocv_community').rglob('*.py'):
         compile(path.read_bytes(),str(path.relative_to(ROOT)),'exec')

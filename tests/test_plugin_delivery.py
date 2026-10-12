@@ -17,6 +17,19 @@ installer = load('install_plugin')
 checker = load('check_host')
 
 class PluginDeliveryTest(unittest.TestCase):
+    def test_windows_git_text_line_endings_are_accepted_and_canonicalized(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as folder:
+            host=self.host(folder)
+            source=Path(folder)/'package'
+            shutil.copytree(ROOT/'plugins/ocv_community',source,ignore=shutil.ignore_patterns('__pycache__'))
+            text=source/'extension_src/frontend/src/voiceLibrary.js'
+            original=text.read_bytes().replace(b'\r\n',b'\n')
+            text.write_bytes(original.replace(b'\n',b'\r\n'))
+            installer.install(host,apply=True,source=source)
+            result=host/'plugins/ocv_community/extension_src/frontend/src/voiceLibrary.js'
+            self.assertEqual(result.read_bytes(),original)
+
     def host(self, folder):
         root = Path(folder) / 'OCV'
         entry = root / 'backend/app/main.py'

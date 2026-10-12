@@ -40,7 +40,13 @@ def install(ocv_root, *, apply=False, source=None):
             raise ValueError('Plugin package contains a linked or escaped path')
         data = path.read_bytes()
         if hashlib.sha256(data).hexdigest() != expected:
-            raise ValueError('Plugin package checksum mismatch: ' + rel)
+            # Older Windows Git archives/checkouts may convert text to CRLF.
+            # Canonicalize known source formats only; binary assets stay exact.
+            text = path.suffix in {'.py','.js','.vue','.json','.md','.txt'} or path.name in {'LICENSE','NOTICE'}
+            canonical = data.replace(b'\r\n',b'\n') if text else data
+            if hashlib.sha256(canonical).hexdigest() != expected:
+                raise ValueError('Plugin package checksum mismatch: ' + rel)
+            data = canonical
         files[rel] = data
     files['package-files.json'] = manifest_path.read_bytes()
     actual = {p.relative_to(source).as_posix() for p in source.rglob('*') if p.is_file()
