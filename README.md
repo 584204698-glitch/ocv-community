@@ -1,5 +1,7 @@
 # OCV Community · 一键成片社区微调版
 
+**后续交付方向：官方 OCV + 可选社区插件。** 用户使用官方主程序，社区仓库负责附加功能、依赖安装说明和兼容说明。当前 `v2026.10.12-rc2` 仍是完整源码预览；独立插件尚未发布，不能直接复制到官方 `plugins/` 使用。迁移边界见 [插件交付约定](docs/plugin-delivery.md)。
+
 基于 [One-Click VidGen](https://github.com/IFRIT-Zhou/One-Click-VidGen) 的非官方增强版，保留原作者署名、许可证、账号登录及原有制作入口。维护仓库：[584204698-glitch/ocv-community](https://github.com/584204698-glitch/ocv-community)。
 
 提供故事创作与一键制作、角色与音色管理、Qwen3-TTS、旁白/对白/混合制作、动态镜头局部恢复、后期音轨编辑及 ComfyUI 接入。见 [升级说明](UPGRADE.md)、[使用说明](docs/community-user-guide.md)、[开发修改地图](docs/community-development.md)。
