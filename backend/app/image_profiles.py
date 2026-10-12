@@ -28,9 +28,14 @@ NATIVE_ENDPOINTS = {"text_endpoint": "/images/generations", "reference_endpoint"
 class ImageProfileRequest(BaseModel):
     id: str | None = Field(default=None, max_length=80)
     name: str = Field(min_length=1, max_length=60)
-    protocol: Literal["async_task", "openai_images"] = "async_task"
+    protocol: Literal["async_task", "openai_images", "openai_sync"] = "async_task"
     credential_source: Literal["profile", "language_custom"] = "profile"
     base_url: str = Field(default="", max_length=2048)
+    size: str = Field(default="auto", max_length=40)
+    quality: str = Field(default="", max_length=40)
+    response_format: Literal["", "b64_json", "url"] = ""
+    request_parameters: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: int = Field(default=600, ge=30, le=1800)
     model_id: str = Field(min_length=1, max_length=256)
     text_endpoint: str = Field(default="/openapi/v2/{model}/text-to-image", max_length=512)
     reference_endpoint: str = Field(default="/openapi/v2/{model}/image-to-image", max_length=512)
@@ -168,7 +173,7 @@ def _profile_contract(profile: dict[str, Any]) -> None:
     profile.setdefault("protocol", "async_task")
     profile.setdefault("credential_source", "profile")
     protocol, source = profile["protocol"], profile["credential_source"]
-    if (not isinstance(protocol, str) or protocol not in {"async_task", "openai_images"}
+    if (not isinstance(protocol, str) or protocol not in {"async_task", "openai_images", "openai_sync"}
             or not isinstance(source, str) or source not in {"profile", "language_custom"}):
         raise ValueError("图像接口协议或凭据来源无效，请重新保存配置")
     profile["base_url"] = _validate_url(profile.get("base_url"))
@@ -180,6 +185,8 @@ def _profile_contract(profile: dict[str, Any]) -> None:
         raise ValueError("异步任务图像接口不能共用文字接口凭据")
     else:
         for key in NATIVE_ENDPOINTS:
+            if protocol == 'openai_sync' and key == 'query_endpoint':
+                continue
             _validate_endpoint(profile.get(key), "图像接口路径")
 
 
@@ -247,6 +254,7 @@ def profile_snapshot(profile_id: str, resolution: str | None = None) -> dict[str
     return {key: profile.get(key) for key in (
         "id", "name", "protocol", "credential_source", "base_url", "model_id", "text_endpoint",
         "reference_endpoint", "query_endpoint", "reference_images",
+        "size", "quality", "response_format", "request_parameters", "timeout_seconds",
     )} | {"resolution": selected}
 
 
@@ -257,6 +265,7 @@ def profile_environment(snapshot: dict[str, Any]) -> dict[str, str]:
         "OCV_IMAGE_PROFILE_ACTIVE": "1",
         "OCV_IMAGE_PROTOCOL": str(first["protocol"]),
         "OCV_IMAGE_REFERENCE_IMAGES": "1" if first["reference_images"] else "0",
+        "OCV_IMAGE_SYNC_OPTIONS": json.dumps({k: first.get(k) for k in ("size", "quality", "response_format", "request_parameters", "timeout_seconds")}),
         "IMAGE_API_BASE_URL": str(first["base_url"]),
         "IMAGE_MODEL_ID": str(first["model"]),
         "IMAGE_RESOLUTION": str(first["resolution"]),
@@ -276,7 +285,7 @@ def profile_provider_configs(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     profile = profile_by_id(str(snapshot.get("id") or ""))
     protocol = snapshot.get("protocol", "async_task")
     source = snapshot.get("credential_source", "profile")
-    if protocol != profile["protocol"] or source != profile["credential_source"]:
+    if protocol != profile.get("protocol", "async_task") or source != profile.get("credential_source", "profile"):
         raise ValueError("图像任务的协议或凭据来源已变化，请重新选择并保存配置")
     base = _validate_url(snapshot.get("base_url") or profile["base_url"])
     if not _same_base(base, profile["base_url"]):
@@ -287,6 +296,8 @@ def profile_provider_configs(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     model = _validate_model(snapshot.get("model_id") or profile.get("model_id"))
     def absolute(endpoint: str) -> str:
         value = endpoint.replace("{model}", model)
+        if (snapshot.get('protocol') or profile.get('protocol')) == 'openai_sync' and base.endswith('/v1') and value.startswith('/v1/'):
+            value = value[3:]
         return value if value.startswith(("http://", "https://")) else f"{base}/{value.lstrip('/')}"
     def async_endpoint(key: str) -> str:
         value = _validate_endpoint(snapshot.get(key) or profile.get(key), "图像任务路径")
@@ -302,11 +313,13 @@ def profile_provider_configs(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         "resolution": resolution,
         "endpoint": NATIVE_ENDPOINTS["text_endpoint"] if protocol == "openai_images" else async_endpoint("text_endpoint"),
         "reference_endpoint": NATIVE_ENDPOINTS["reference_endpoint"] if protocol == "openai_images" else async_endpoint("reference_endpoint"),
-        "query_url": "" if protocol == "openai_images" else async_endpoint("query_endpoint"),
+        "query_url": "" if protocol in {"openai_images", "openai_sync"} else async_endpoint("query_endpoint"),
         "reference_images": (snapshot.get("reference_images", True) is True
                              and profile.get("reference_images", True) is True)
                             if protocol == "openai_images" else snapshot.get("reference_images", profile.get("reference_images", True)),
     }
+    for key, default in {"size": "auto", "quality": "", "response_format": "", "request_parameters": {}, "timeout_seconds": 600}.items():
+        common[key] = snapshot.get(key, profile.get(key, default))
     return [
         {**common, "api_key": str(key), "account_label": f"账号 {index}"}
         for index, key in enumerate(profile.get("api_keys") or [], 1)
@@ -337,6 +350,17 @@ def save_profile(payload: ImageProfileRequest, request: Request) -> dict[str, An
         if not re.fullmatch(r"[A-Za-z0-9_-]+", profile_id):
             raise ValueError("配置 ID 无效")
         resolutions = list(dict.fromkeys(value.lower() for value in payload.resolutions))
+        if payload.protocol == 'openai_sync':
+            if payload.text_endpoint == '/openapi/v2/{model}/text-to-image':
+                payload.text_endpoint = '/v1/images/generations'
+            if payload.reference_endpoint == '/openapi/v2/{model}/image-to-image':
+                payload.reference_endpoint = '/v1/images/edits'
+        if not re.fullmatch(r'auto|[1-9][0-9]{1,4}x[1-9][0-9]{1,4}', payload.size):
+            raise ValueError('同步图像尺寸须为 auto 或宽x高，例如1536x1024')
+        if any(k in payload.request_parameters for k in ('model', 'prompt', 'n', 'image', 'image[]', 'api_key', 'headers', 'stream')):
+            raise ValueError('额外参数不能覆盖模型、提示词、图片、数量、密钥或流式设置')
+        if len(json.dumps(payload.request_parameters)) > 10000:
+            raise ValueError('额外参数过长')
         if not resolutions or any(value not in SUPPORTED_RESOLUTIONS for value in resolutions):
             raise ValueError("请至少选择一种受支持的分辨率")
         document = {
@@ -345,8 +369,11 @@ def save_profile(payload: ImageProfileRequest, request: Request) -> dict[str, An
             "base_url": base_url, "model_id": model_id,
             "text_endpoint": payload.text_endpoint if payload.protocol == "openai_images" else _validate_endpoint(payload.text_endpoint, "文生图路径"),
             "reference_endpoint": payload.reference_endpoint if payload.protocol == "openai_images" else _validate_endpoint(payload.reference_endpoint, "参考生图路径"),
-            "query_endpoint": "" if payload.protocol == "openai_images" else _validate_endpoint(payload.query_endpoint, "状态查询路径"),
+            "query_endpoint": "" if payload.protocol in {"openai_images", "openai_sync"} else _validate_endpoint(payload.query_endpoint, "状态查询路径"),
             "resolutions": resolutions, "reference_images": bool(payload.reference_images),
+            "size": payload.size, "quality": payload.quality,
+            "response_format": payload.response_format, "request_parameters": payload.request_parameters,
+            "timeout_seconds": payload.timeout_seconds,
         }
         with LOCK:
             documents = _read_documents()

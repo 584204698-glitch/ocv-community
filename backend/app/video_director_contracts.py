@@ -5,7 +5,7 @@ module4_video_render.ENHANCED_DIRECTOR_AGENT2_CONTRACT. Keep the image
 pipeline independent: video timing and motion contracts differ.
 """
 
-VIDEO_DIRECTOR_REVISION = 'single_core_v7_20261002_story_staging'
+VIDEO_DIRECTOR_REVISION = 'single_core_v8_20261012_story_medical_integration'
 
 # Verified opening from the user's September 17 single-reference video test.
 # Assemble before saving the editable prompt, never at provider submission time.
@@ -164,6 +164,12 @@ def enforce_no_auto_subtitles(prompt: str) -> str:
     return prompt if NO_AUTO_SUBTITLES in prompt else (prompt + '\n' + NO_AUTO_SUBTITLES).strip()
 
 SPEECH_ATTRIBUTION_CONTRACT = """【发言与想法的归属：不是谁配音就归谁】
+先判断有没有需要表现的画面对话。story_context.speech_attribution 是全文归属依据；
+semantic.speech_mode=none 或 on_screen=none 表示不需要画面人物发言，不因旁白、问号或第二人称
+添加主持人、观众、张嘴动作、对口型、气泡或画中文字。已有角色可以做与讲解有关的动作，不必说话。
+quoted、假设、模仿不是默认现场对话；unknown/uncertain 保留歧义，不自动派给主角。
+语义与核心画面阶段每镜先写 semantic.speech_mode（none/dialogue/mixed/uncertain），
+无画面对话填none和speech_turns=[]；其他情况只记录本镜有原文依据的关系。
 区分旁白朗读者、原文中实际发言/持有想法的人、画面上承载该内容的人。旁白转述别人的提问、
 评价或想法，不等于主角亲自提出、认同或说出了它；“讲者列举某观点”不是把该观点放到讲者气泡的依据。
 先读原文的引语引导、称呼、我/你/他们、问答对象与上下文，判断谁向谁提问、谁回答、谁想象。
@@ -174,17 +180,27 @@ SPEECH_ATTRIBUTION_CONTRACT = """【发言与想法的归属：不是谁配音�
 语义规划与核心画面阶段在 semantic.speech_turns 按原文先后记录有归属意义的发言/想法；后续动态
 与定稿阶段只读取核对，不再输出这份清单。同一归属的连续话合为一项，只摘关键短语，不逐条抄字幕。每项只含：
 source_text（本镜对应的短原文，不改写）、speaker（观点/提问的归属者，稳定短角色名，不是TTS音色）、
-addressee（面向谁，无则空）、mode（spoken/thought/quoted/narration/unknown）、basis（一句原文或上下文依据）。
+addressee（面向谁，无则空）、mode（spoken/thought/quoted/narration/unknown）、basis（一句原文或上下文依据）、
+on_screen（dialogue/thought/none/uncertain）、certainty（explicit/contextual/uncertain）。
 quoted 的 speaker 是被转述的人，不能因为配音是主角就填主角；该字段不要求额外配音或逐字对口型。
 纯说明可填 []。这是关系依据，不是要把所有 source_text 都写进画面；无字图案的气泡也要保留相同归属。
 用户明确指定的角色/观点关系与当前原文优先于旧 intent、摘要或人物档案。speech_turns 是可核对的
 语义草案，若与原文矛盾须纠正，不能把上游错归属锁死。场景参考只给空间，不改变谁说话。
+Agent 1 和 Agent 2 沿原文锚点继承全文记录；有明确依据才修正，并说明 attribution_correction。
+Agent 3、4、5 沿用 Agent 2 已核对的关系，不自行再次分派台词；不确定不等于必须补出说话人。
 画面若采用人物互动，讲者的问题/展示物和另一方的回应/想象分别归各自主体，气泡尾部指向对应人。
 群体的多个短回应可由其中几人零散分别表达，不要求全体齐说，不把问题与不同人的回应合成主角的大气泡。
 说话者也可以是没有独立角色卡的群体；稳定主体名可仍用群体名，具体几人和位置在动作中区分。
 自检动作正文、图案气泡、texts.owner 和容器是否同属一个人；不能正文写主角开口、清单却填观众，
 也不能把已有归属的对话偷换成“画面标注”。仅客观图例/说明可以用独立标注；不强制所有画面使用气泡。
 """
+
+SPEECH_HANDOFF_CONTRACT = """【已确认归属的交接】
+只继承本镜 semantic.speech_turns 中已核对的归属，不重新分配提问、回答或想法。
+speech_mode=none、on_screen=none 的讲解不用画面人物说出；不因有配音而新增人物、气泡或开口动作。
+quoted/unknown/uncertain 不等于现场对话；没有归属记录也不要求补出说话人。
+关系记录不是画中文字清单；优先用既定动作、表情或图案表达，不能把原文整句抄进画面。
+用户明确的本镜手动修改优先于自动归属记录。"""
 
 SEMANTIC_CONTRACT = """【原文理解与表达目的】
 先理解后选景。保留本段独有的参与者、动作/责任关系、因果来源、立场、否定和条件，
@@ -225,7 +241,7 @@ video 优先以视频前段已经开始表达内容的场面为主体，可自�
 控制元素靠阅读清晰度与表达必要性，不按固定数量删掉必要的角色、气泡或图解。原文中的每个名词
 也不必都画出来。示意性补充可以帮助理解，不能捏造精确数字、病情、事实或人物关系。
 visual_description 写一张可直接绘制的完整核心图：人物/物体及属性、正在发生的动作关系、布局、
-环境、必要短字或图案及其归属。visual_design 输出 candidates（两个短方案）、selection_reason、
+环境、必要短字或图案及其归属。visual_design 输出 candidates（两个短方案，必须是字符串数组，例如 ["方案一的画面描述", "方案二的画面描述"]，不可用对象，每项不超过3000字）、selection_reason、
 expression（narrative/experience/explanatory/metaphor/asset_display）、human_presence（none/present/partial）、
 visible_evidence（观众从画面能看到的本段特有信息）。不输出内部长篇推理。
 用户设定优先；同一现场的人物、服装和布局保持连续，换景不带走整套道具。人物档案不等于出镜名单。
@@ -259,6 +275,9 @@ SPATIAL_MOTION_CONTRACT = """【动作位移与镜间衔接】
 """
 
 MOTION_CONTRACT = OBJECT_CONTINUITY_CONTRACT + SPATIAL_MOTION_CONTRACT + """【共享阶段方案 v2】
+每个机制、互动或状态变化应有可辨认的初态、动作和结果，不能仅写“逐渐变化、轻微移动”。
+动作幅度与速度以原文和理解需求为准，不为了动态夸大事实。运镜应揭示空间关系或变化结果，
+不靠全片无目的微推代替叙事；固定镜头可以，只要动作或递进内容足够清楚。
 基于 Agent2 的场景、主体和具体表达设计 motion_plan，负责把它变成可执行的过程，保持场景与
 表达手段。只因动作需要调整局部站位、视线与构图，不重新选全局场景、隐喻或剧情，不迁移发言/想法归属。
 按 semantic.speech_turns 与原文核对提问方、回应方和引用观点持有者；核心图中的归属应延续到动态。

@@ -222,6 +222,7 @@
             <span class="switch-track"><span></span></span>
           </label>
         </div>
+        <div v-if="form.use_cloud_image_pool"><label class="stack"><span>图片生成渠道</span><select v-model="form.method"><option value="running">稳定版</option><option value="ican">ICAN · GPT Image 2.5</option></select></label><CloudImageQuality :form="form" /></div>
         <div v-if="form.use_cloud_image_pool" class="cloud-pool-status" :class="cloudSession.authenticated ? 'ready' : 'warning'">
           <span v-if="cloudSession.authenticated">文本 + 图像号池已启用 · 可用积分 {{ cloudAvailableCredits }}</span>
           <button v-else type="button" @click="openCloudLogin">请先登录云端账户</button>
@@ -305,12 +306,13 @@
           <div class="cloud-auth-dialog-head">
             <div>
               <span class="cluster-card-kicker">ONE-CLICK VIDGEN CLOUD</span>
-              <h2 id="cloud-auth-title">{{ cloudSession.authenticated ? '云端账户' : '登录云端服务' }}</h2>
+              <h2 id="cloud-auth-title">{{ cloudRecoveryOpen ? '忘记密码' : cloudSession.authenticated ? '云端账户' : '登录云端服务' }}</h2>
             </div>
             <button class="cloud-auth-close" type="button" aria-label="关闭登录窗口" @click="cloudLoginOpen = false">×</button>
           </div>
 
-          <div v-if="!cloudSession.configured" class="cluster-notice warning">
+          <CloudPasswordRecovery v-if="cloudRecoveryOpen" :initial-email="cloudLoginForm.email" @back="closeCloudRecovery" @reset="onCloudPasswordReset" />
+          <div v-else-if="!cloudSession.configured" class="cluster-notice warning">
             云端服务正在部署中，登录入口已经准备完毕。服务上线后会由程序自动连接，无需用户填写服务器地址。
           </div>
           <template v-else-if="cloudSession.authenticated">
@@ -331,6 +333,7 @@
           <form v-else class="cloud-auth-form" @submit.prevent="loginCloud">
             <label><span>邮箱</span><input v-model.trim="cloudLoginForm.email" type="email" autocomplete="email" placeholder="请输入注册邮箱" required /></label>
             <label><span>密码</span><input v-model="cloudLoginForm.password" type="password" autocomplete="current-password" placeholder="请输入密码" required /></label>
+            <button class="ghost-btn cloud-auth-recovery" type="button" @click="openCloudRecovery">忘记密码？通过邮箱找回</button>
             <button class="primary-btn cloud-auth-submit" type="submit" :disabled="cloudBusy">
               {{ cloudBusy ? '正在登录…' : '登录' }}
             </button>
@@ -1109,6 +1112,14 @@
                     <option value="fast">紧凑</option>
                     <option value="custom">自定义</option>
                   </select>
+                </label>
+                <label v-if="form.dynamic_video" class="visual-pacing-select">
+                  <span>动态镜头规划上限</span>
+                  <select v-model.number="form.dynamic_max_shot_duration">
+                    <option :value="15">常规 · 15 秒</option>
+                    <option :value="30">长镜头 · 30 秒</option>
+                  </select>
+                  <small class="muted">上限不是目标时长。30 秒需视频模型支持，成本与本地显存占用可能增加；手动编辑不受强制拆分。</small>
                 </label>
                 <div v-if="form.visual_pacing_preset === 'custom'" class="form-grid visual-pacing-custom">
                   <label>
@@ -1920,7 +1931,7 @@
                     <strong>{{ plugin.name }}</strong>
                     <span>v{{ plugin.version }} · {{ plugin.author }}</span>
                   </div>
-                  <label class="inline-switch plugin-toggle" :title="plugin.valid ? '记录插件启用状态；当前框架不会执行插件代码' : '清单无效，无法启用'">
+                  <label class="inline-switch plugin-toggle" :title="plugin.valid ? (plugin.framework_only ? '仅记录启用状态' : '启用或停用此插件功能') : '清单无效，无法启用'">
                     <input :checked="plugin.enabled" type="checkbox" :disabled="!plugin.valid || pluginToggling === plugin.folder" @change="togglePlugin(plugin)" />
                     <span class="switch-track"><span></span></span>
                   </label>
@@ -1929,7 +1940,7 @@
                 <div class="plugin-meta">
                   <span>类型：{{ plugin.type }}</span>
                   <span v-if="plugin.ocv_version">OCV：{{ plugin.ocv_version }}</span>
-                  <span>{{ plugin.enabled ? '已启用（仅记录）' : '已停用' }}</span>
+                  <span>{{ plugin.enabled ? (plugin.framework_only ? '已启用（仅记录）' : '已启用') : '已停用' }}</span>
                 </div>
                 <div v-if="plugin.permissions?.length" class="plugin-permissions">声明权限：{{ plugin.permissions.join('、') }}</div>
                 <div v-if="plugin.issue" class="board-error">清单错误：{{ plugin.issue }}</div>
@@ -2209,6 +2220,7 @@
                         <label><span>云端密码</span><input v-model="cloudLoginForm.password" type="password" /></label>
                         <button class="primary-btn" type="button" :disabled="cloudBusy" @click="loginCloud">登录集群</button>
                       </div>
+                      <button class="ghost-btn cloud-auth-recovery" type="button" @click="openCloudRecovery">忘记密码？通过邮箱找回</button>
                     </template>
                     <small v-if="cloudError" class="script-upload-error">{{ cloudError }}</small>
                   </div>
@@ -2663,6 +2675,7 @@
             <div><strong>{{ localTtsComponent.message }}</strong><p v-if="localTtsComponent.installing || localTtsComponent.downloaded_bytes">已下载 {{ localTtsDownloadedGb }} / 约 {{ localTtsEstimatedGb }} GB；安装可在后台继续。</p></div>
           </article>
           <p v-if="localTtsInstallError" class="studio-notice error">{{ localTtsInstallError }}</p>
+          <ModelInstallGuide kind="tts" />
           <div class="preflight-actions">
             <button class="ghost-btn" type="button" @click="switchToClusterTts">改用集群 GPU</button>
             <button class="primary-btn" type="button" :disabled="localTtsInstallBusy || localTtsComponent.installing || localTtsComponent.ready || localTtsComponent.runtime_missing?.length" @click="startLocalTtsInstall">
@@ -2712,8 +2725,11 @@
 </template>
 
 <script>
+import CloudPasswordRecovery from './components/CloudPasswordRecovery.vue'
+import CloudImageQuality from './components/CloudImageQuality.vue'
 import { useWorkspace } from './useWorkspace'
 import ReferenceMaterials from './components/ReferenceMaterials.vue'
+import ModelInstallGuide from './components/ModelInstallGuide.vue'
 import DynamicTextModeSelector from './components/DynamicTextModeSelector.vue'
-export default { components: { DynamicTextModeSelector, ReferenceMaterials }, setup: useWorkspace }
+export default { components: { CloudPasswordRecovery, CloudImageQuality, ModelInstallGuide, DynamicTextModeSelector, ReferenceMaterials }, setup: useWorkspace }
 </script>

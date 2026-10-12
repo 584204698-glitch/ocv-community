@@ -79,7 +79,7 @@ class AsrRuntimeSelectionTest(unittest.TestCase):
         with (
             patch.object(pipeline.sys, "executable", str(self.base)),
             patch.object(pipeline, "_asr_runtime_available", return_value=(False, "missing ctranslate2")) as probe,
-            self.assertRaisesRegex(RuntimeError, "ASR_PYTHON.*missing ctranslate2"),
+            self.assertRaisesRegex(RuntimeError, "字幕识别运行环境检查未通过.*missing ctranslate2"),
         ):
             pipeline.resolve_asr_python()
         probe.assert_called_once_with(str(self.selected))
@@ -100,7 +100,7 @@ class AsrRuntimeSelectionTest(unittest.TestCase):
         with (
             patch.dict(pipeline.os.environ, {"ASR_PYTHON": str(self.root / "missing-python")}),
             patch.object(pipeline, "_asr_runtime_available") as probe,
-            self.assertRaisesRegex(RuntimeError, "ASR_PYTHON"),
+            self.assertRaisesRegex(RuntimeError, "字幕识别运行环境检查未通过.*missing-python"),
         ):
             pipeline.resolve_asr_python()
         probe.assert_not_called()

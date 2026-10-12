@@ -288,8 +288,9 @@ test('local video dimensions never fall back to unrelated cloud 720p settings', 
 })
 
 test('local queue append submits only pending shots after an explicit action', async t => {
-  const e=await editor(t)
+  const e=await editor(t, url => url === '/api/comfyui' ? Response.json({profiles:[{id:'local-test',kind:'video'}]}) : null)
   e.records.a.creation_parameters.video_generation_backend='comfyui'
+  e.records.a.creation_parameters.comfyui_profile_id='local-test'
   e.records.a.shots[0].video_status='running'
   e.records.a.shots[1].video_status='unknown'
   e.records.a.shots[2].video_status='failed';e.records.a.shots[2].video_terminal=true
@@ -299,7 +300,8 @@ test('local queue append submits only pending shots after an explicit action', a
   t.mock.method(globalThis,'confirm',()=>true)
   await e.panel.generateVideos(e.panel.localQueueCandidates.value);await e.flush()
   assert.deepEqual(e.calls.filter(call=>call.method==='POST'),[
-    {url:'/api/video-studio/a/videos/generate',method:'POST',body:{revision:1,shot_ids:['a-4'],retry_failed:false}},
+    {url:'/api/video-studio/a/videos/generate',method:'POST',body:{revision:1,shot_ids:['a-4'],retry_failed:false,regenerate_completed:false,
+      shot_options:{'a-4':{backend:'comfyui',profile_id:'local-test',resolution:'',h3_prompt_agent:false}}}},
   ])
   e.panel.project.value.status='video_stopping'
   assert.deepEqual(e.panel.localQueueCandidates.value,[])

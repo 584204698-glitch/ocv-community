@@ -284,7 +284,9 @@ test('editing automatic dynamic audio stays in its editor until the user explici
   assert.equal(browser.sessionStorage.getItem('ocv-video-audio-edit'), null)
   assert.equal(browser.sessionStorage.getItem('ocv-video-autoplan'), null)
   assert.deepEqual(transitionCalls(), [{url: '/api/video-studio/by-audio-task/' + h.source_project.id, method: 'GET'}])
-  assert.equal(calls.every(({method}) => method === 'GET'), true, 'unchanged audio needs no import or synchronization write')
+  assert.deepEqual(calls.filter(({method}) => method !== 'GET'), [
+    {url: '/api/video-studio/' + h.id + '/sync-audio', method: 'POST'},
+  ], 'returning from audio editing compares canonical files without re-importing or planning')
 })
 
 test('a video project replaces its exact source job in the home list while other jobs remain accessible', async t => {

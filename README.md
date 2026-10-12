@@ -37,4 +37,4 @@ npm --prefix frontend run build
 
 ## 来源与许可证
 
-上游基线：`97cc34c58366357759f0eb74553143f6c08bace7`。沿用 [AGPL-3.0-only](LICENSE)、[附加条款](ADDITIONAL_TERMS.md)、[署名](AUTHORS.md)、[商标规则](TRADEMARKS.md)、[第三方声明](THIRD_PARTY_NOTICES.md)。社区版与官方发行和服务不应混淆。
+上游基线：`fdb4ba1b880b60d3019f4bf31db2a767fdb897d8`（官方 2026.10.12.1）。沿用 [AGPL-3.0-only](LICENSE)、[附加条款](ADDITIONAL_TERMS.md)、[署名](AUTHORS.md)、[商标规则](TRADEMARKS.md)、[第三方声明](THIRD_PARTY_NOTICES.md)。社区版与官方发行和服务不应混淆。

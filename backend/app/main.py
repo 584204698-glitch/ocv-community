@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Zhou Ruoyu and He Yun
 # AGPL-3.0 Section 7 terms: ../../ADDITIONAL_TERMS.md
 
+from .cloud_image_channel import ImageSize
 import json
 import os
 import re
@@ -202,6 +203,8 @@ class GenerateRequest(VideoRenderOptions):
     visual_style: str = "video-edit-agent"
     visual_backend: str | None = "poster"
     use_cloud_image_pool: bool = False
+    method: Literal["running", "ican"] = "running"
+    size: ImageSize = "2560x1440"
     image_profile_id: str | None = Field(default=None, max_length=80)
     image_resolution: Literal["1k", "2k", "4k"] | None = None
     video_render_variant: Literal["subtitles", "raw", "both"] = "both"
@@ -216,13 +219,16 @@ class GenerateRequest(VideoRenderOptions):
     # Keep the same persisted, resumable stage workflow while allowing OCV to
     # accept each successful review gate on the user's behalf.
     dynamic_auto_advance: bool = False
-    dynamic_text_mode: Literal['text_assisted', 'visual_first'] = 'text_assisted'
+    dynamic_text_mode: Literal['text_assisted', 'visual_first', 'medical_paper'] = 'text_assisted'
     video_generation_backend: Literal['api', 'comfyui'] = 'api'
     comfyui_profile_id: str = Field(default='', max_length=80)
     comfyui_h3_prompt_agent: bool = False
     comfyui_reference_audio: bool = False
+    presenter_mode: bool = False
+    presenter_reference_id: str = Field(default='', max_length=200)
     visual_prompt_mode: Literal["simple", "full"] = "simple"
     visual_pacing_preset: Literal["auto", "slow", "standard", "fast", "custom"] = "standard"
+    dynamic_max_shot_duration: Literal[15, 30] = 15
     visual_min_duration: float | None = Field(default=None, ge=4, le=20)
     visual_target_duration: float | None = Field(default=None, ge=5, le=30)
     visual_max_duration: float | None = Field(default=None, ge=6, le=40)
@@ -424,7 +430,7 @@ class RegisterRequest(BaseModel):
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str = Field(..., min_length=1, max_length=128)
+    password: str = Field(..., min_length=1, max_length=200)
 
 
 class CloudRegisterRequest(BaseModel):
@@ -436,6 +442,15 @@ class CloudRegisterRequest(BaseModel):
 class CloudLoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=1, max_length=128)
+
+
+class CloudRecoveryEmailRequest(BaseModel):
+    email: EmailStr
+
+
+class CloudRecoveryConfirmRequest(CloudRecoveryEmailRequest):
+    code: str = Field(pattern=r"^[0-9]{6}$")
+    password: str = Field(min_length=10, max_length=200)
 
 
 class CloudRechargeRequest(BaseModel):
@@ -488,8 +503,12 @@ from .voice_design import router as voice_design_router
 app.include_router(voice_design_router)
 from .comfyui_bridge import router as comfyui_bridge_router
 app.include_router(comfyui_bridge_router)
+from .managed_comfyui import router as managed_comfyui_router
+app.include_router(managed_comfyui_router)
 from .video_studio import router as video_studio_router
 app.include_router(video_studio_router)
+from .codex_bridge import router as codex_bridge_router
+app.include_router(codex_bridge_router)
 from .video_model_config import router as video_model_config_router
 from .video_generation import router as video_generation_router
 from .video_export import reconcile_completed_projects, router as video_export_router
@@ -625,7 +644,17 @@ def _plugin_manifest_items() -> list[dict[str, Any]]:
                     "valid": True,
                 }
             )
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            if record['type'] == 'director_profile':
+                from .director_extensions import read_profile
+                read_profile(resolved_folder)
+                record['framework_only'] = False
+            elif record['type'] == 'production_bridge':
+                from .codex_bridge import plugin_valid
+                if not plugin_valid(resolved_folder):
+                    raise ValueError('未识别的制作桥插件；不执行任意插件代码')
+                record['framework_only'] = False
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, AttributeError) as exc:
+            record['valid'] = False
             record["issue"] = str(exc)
         items.append(record)
     return items
@@ -693,10 +722,18 @@ def list_plugins(request: Request) -> dict[str, Any]:
     return {
         "plugins": plugins,
         "directory": str(PLUGINS_DIR.resolve()),
-        "framework_only": True,
+        "framework_only": not any(p['valid'] and not p['framework_only'] for p in plugins),
         "execution_enabled": False,
-        "notice": "当前版本只读取插件清单，不会导入或执行第三方插件代码。",
+        "notice": "支持可选导演配置与 Codex 制作桥；仅使用宿主提供的受控接口，不执行任意第三方代码。",
     }
+
+
+@app.get("/api/director-profiles")
+def director_profiles(request: Request) -> dict[str, Any]:
+    require_user(request)
+    from .director_extensions import profiles
+    return {'profiles': [{key: value[key] for key in ('id', 'label', 'description')}
+                         for value in profiles(PLUGINS_DIR).values()]}
 
 
 @app.post("/api/plugins/{folder_name}/toggle")
@@ -719,7 +756,8 @@ def toggle_plugin(folder_name: str, request: Request) -> dict[str, Any]:
     else:
         marker.write_text("OCV plugin disabled by user.\n", encoding="utf-8")
         enabled = False
-    return {"ok": True, "folder": folder_name, "enabled": enabled, "framework_only": True}
+    item = next((item for item in _plugin_manifest_items() if item['folder'] == folder_name), {})
+    return {"ok": True, "folder": folder_name, "enabled": enabled, "framework_only": item.get('framework_only', True)}
 
 
 @app.post("/api/plugins/open-folder")
@@ -792,6 +830,7 @@ def _cloud_error(exc: CloudApiError) -> HTTPException:
     return HTTPException(
         status_code=exc.status_code,
         detail=f"{exc}{suffix}{request_id}",
+        headers={"Retry-After": exc.retry_after} if exc.retry_after else None,
     )
 
 
@@ -820,6 +859,24 @@ def cloud_login(payload: CloudLoginRequest, request: Request) -> dict[str, Any]:
     _user, client = _cloud_for_request(request)
     try:
         return client.login(str(payload.email), payload.password)
+    except CloudApiError as exc:
+        raise _cloud_error(exc) from exc
+
+
+@app.post("/api/cloud/auth/password-reset/request")
+def cloud_recovery_request(payload: CloudRecoveryEmailRequest, request: Request) -> dict[str, Any]:
+    _user, client = _cloud_for_request(request)
+    try:
+        return client.request_password_reset(str(payload.email))
+    except CloudApiError as exc:
+        raise _cloud_error(exc) from exc
+
+
+@app.post("/api/cloud/auth/password-reset/confirm")
+def cloud_recovery_confirm(payload: CloudRecoveryConfirmRequest, request: Request) -> dict[str, Any]:
+    _user, client = _cloud_for_request(request)
+    try:
+        return client.confirm_password_reset(str(payload.email), payload.code, payload.password)
     except CloudApiError as exc:
         raise _cloud_error(exc) from exc
 
@@ -1659,7 +1716,7 @@ def preflight_job(payload: GenerateRequest, request: Request) -> dict[str, Any]:
                     try:
                         account = client.account_summary()
                         client.model_pool_status()
-                        client.image_pool_status()
+                        client.image_pool_status(data.get("method", "running"))
                         credits = account.get("credits") if isinstance(account.get("credits"), dict) else {}
                         available = float(credits.get("available") or 0)
                         pool_status = "passed" if available > 0 else "error"
@@ -1680,13 +1737,17 @@ def preflight_job(payload: GenerateRequest, request: Request) -> dict[str, Any]:
                         add("language_api", "云端文本号池", "error", message)
                         add("image_api", "云端号池", "error", message)
 
+        if data.get('dynamic_video') and data.get('presenter_mode'):
+            valid_presenter = data.get('presenter_reference_id') in (data.get('reference_image_ids') or [])
+            add('presenter', '讲解员参考图', 'passed' if valid_presenter else 'error',
+                '已指定讲解员，按镜头规划开口表演' if valid_presenter else '请选择已上传的讲解员参考图')
         if data.get('dynamic_video') and data.get('video_generation_backend') == 'comfyui':
             from .comfyui_bridge import video_profile
             try:
                 profile = video_profile(int(user['id']), str(data.get('comfyui_profile_id') or ''))
                 h3_note = ' · H3 提示词转换 Agent 已启用' if data.get('comfyui_h3_prompt_agent') else ''
-                effective_reference_audio = bool(data.get('comfyui_reference_audio') and
-                                                 not data.get('comfyui_h3_prompt_agent'))
+                effective_reference_audio = bool(data.get('presenter_mode') or (data.get('comfyui_reference_audio') and
+                                                 not data.get('comfyui_h3_prompt_agent')))
                 audio_note = ' · 注入本镜 TTS 参考音频' if effective_reference_audio else ''
                 if effective_reference_audio:
                     binding = (profile.get('mappings') or {}).get('audio') or {}
@@ -1757,6 +1818,48 @@ def preflight_job(payload: GenerateRequest, request: Request) -> dict[str, Any]:
 def get_api_key_settings(request: Request) -> dict[str, Any]:
     require_user(request)
     return {"keys": _api_key_status()}
+
+
+from .language_presets import LanguagePreset, presets, save_preset, activate_preset, delete_preset, LOCK as LANGUAGE_PRESET_LOCK
+
+
+@app.get('/api/language-presets')
+def get_language_presets(request: Request):
+    require_user(request)
+    status = language_provider_status()
+    return {'presets': presets(), 'current': status}
+
+
+@app.put('/api/language-presets')
+def put_language_preset(payload: LanguagePreset, request: Request):
+    require_user(request)
+    try:
+        with LANGUAGE_PRESET_LOCK:
+            return {'preset': save_preset(payload)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post('/api/language-presets/{identity}/activate')
+def select_language_preset(identity: str, request: Request):
+    require_user(request)
+    from . import video_studio
+    with video_studio.LOCK, LANGUAGE_PRESET_LOCK:
+        if video_studio.ACTIVE or any(job['status'] == 'running' for job in store.active_job_summary()):
+            raise HTTPException(409, '有任务正在运行，请结束后切换全局语言模型')
+        try:
+            activate_preset(identity)
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+    return get_language_presets(request)
+
+
+@app.delete('/api/language-presets/{identity}')
+def remove_language_preset(identity: str, request: Request):
+    require_user(request)
+    with LANGUAGE_PRESET_LOCK:
+        delete_preset(identity)
+    return get_language_presets(request)
 
 
 @app.put("/api/api-keys")
@@ -2278,7 +2381,7 @@ def create_job(payload: GenerateRequest, request: Request) -> dict[str, Any]:
         try:
             account = client.account_summary()
             client.model_pool_status()
-            client.image_pool_status()
+            client.image_pool_status(data.get("method", "running"))
             credits = account.get("credits") if isinstance(account.get("credits"), dict) else {}
             if float(credits.get("available") or 0) <= 0:
                 raise HTTPException(status_code=402, detail="云端账户积分不足，无法使用文本与图像号池")
@@ -2486,10 +2589,10 @@ def advance_step_workflow(
         "start_visual": {
             "video_orientation",
             "content_mode", "director_strategy", "scene_references_enabled", "auto_split_long_text", "split_text_threshold",
-            "visual_backend", "use_cloud_image_pool", "image_profile_id", "image_resolution", "visual_prompt_mode",
+            "visual_backend", "use_cloud_image_pool", "method", "size", "image_profile_id", "image_resolution", "visual_prompt_mode",
             "visual_pacing_preset", "visual_min_duration", "visual_target_duration",
-            "visual_max_duration", "visual_max_slides", "visual_style_prompt",
-            "global_character_prompt", "reference_image_ids", "reference_image_notes", "reference_image_labels", "reference_image_kinds", "story_environment_prompt",
+            "visual_max_duration", "visual_max_slides", "visual_style_prompt", "dynamic_max_shot_duration",
+            "global_character_prompt", "reference_image_ids", "reference_image_notes", "reference_image_labels", "reference_image_kinds", "story_environment_prompt", "presenter_mode", "presenter_reference_id",
             "visual_prompt_system", "agent0_prompt_system", "agent1_prompt_system",
             "agent2_director_theme",
         },
@@ -2565,7 +2668,7 @@ def advance_step_workflow(
             try:
                 account = client.account_summary()
                 client.model_pool_status()
-                client.image_pool_status()
+                client.image_pool_status(job.request.get("method", "running"))
                 credits = account.get("credits") if isinstance(account.get("credits"), dict) else {}
                 if float(credits.get("available") or 0) <= 0:
                     raise HTTPException(status_code=402, detail="云端账户积分不足，无法使用文本与图像号池")
@@ -3064,6 +3167,7 @@ def get_scene_assets(job_id: str, request: Request) -> dict[str, Any]:
         if not sid:
             continue
         asset = assets.setdefault(sid, {"id": "scene_asset_" + sid, "name": scene.get("name") or sid,
+            "references": [{'label': f'图{index+1}', 'image_url': f'/api/jobs/{job_id}/reference-material/scene_asset_{sid}/{index}'} for index, _ in enumerate(scene.get('reference_image_paths') or [])],
             "prompt": scene.get("prompt") or "", "image_url": f"/api/jobs/{job_id}/scene-reference/{item['macro_scene_id']}", "used_by": []})
         asset["used_by"].append(item["macro_scene_id"])
     with visual_editor._lock:
@@ -3079,6 +3183,10 @@ def get_reference_material(job_id: str, macro_id: str, index: int, request: Requ
     project = visual_editor.output_dir(job_id, user_id)
     mapping = visual_editor._load_mapping(project)
     item = next((row for row in mapping if row.get('macro_scene_id') == macro_id), {})
+    if macro_id.startswith('scene_asset_'):
+        scene = next((row.get('scene_reference') for row in mapping if (row.get('scene_reference') or {}).get('scene_id') == macro_id.removeprefix('scene_asset_')), {})
+        item = {'reference_image_paths': scene.get('reference_image_paths', []),
+                'reference_materials': scene.get('reference_image_paths', [])}
     paths = item.get('reference_image_paths') or []
     if index < 0 or index >= len(item.get('reference_materials') or []) or index >= len(paths):
         raise HTTPException(status_code=404, detail='reference material not found')

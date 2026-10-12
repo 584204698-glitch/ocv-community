@@ -7,11 +7,11 @@
    <button class="new-button" @click="newProject('dynamic')">▷ 新建动态视频</button>
    <nav><button :class="{active:studioPage==='stories'}" @click="navigateStudio('stories')"><span>✎</span>故事创作</button><button :class="{active:studioPage==='home'}" @click="goHome"><span>▦</span>项目首页</button><button :class="{active:studioPage==='logs'}" @click="openLogs()" aria-label="任务日志"><span>≋</span>任务日志</button><p>附加功能</p><button @click="newProject('audio')"><span>◉</span>配音工作室</button><button @click="newProject('subtitle')"><span>≡</span>字幕识别</button><button :class="{active:studioPage==='images'}" @click="navigateStudio('images')"><span>▧</span>图片工作室</button><button :class="{active:studioPage==='comfyui'}" @click="navigateStudio('comfyui')"><span>⌘</span>ComfyUI 工作台</button></nav>
    <button v-for="job in studioLiveJobs" :key="job.id" class="running running-project-entry" @click="openProject(job)" :aria-label="'返回进行中项目：'+(job.request?.project_name||job.id)" title="返回此项目当前进度页面"><b>{{job.progress}}%</b><span class="dot"/> 任务进行中<progress :value="job.progress" max="100"/><span class="running-project-name">{{job.request?.project_name||job.id}} →</span></button>
-   <div class="rail-bottom"><button @click="studioDrawer='接口与服务'">⚙ <span>接口与服务</span><i v-if="health.ok" class="dot"/></button><button @click="navigateStudio('plugins');openPluginsPage()">⊞ <span>插件与设置</span></button><a class="legacy-link" href="/legacy.html">返回经典界面 ↗</a><div class="local"><span class="avatar">本</span><div>本地工作空间<small>{{health.ok?'后端已连接':'正在连接后端…'}}</small></div></div>
+   <div class="rail-bottom"><button :class="{active:studioPage==='services'}" @click="studioDrawer='接口与服务'">⚙ <span>接口与服务</span><i v-if="health.ok" class="dot"/></button><button @click="navigateStudio('plugins');openPluginsPage()">⊞ <span>插件与设置</span></button><a class="legacy-link" href="/legacy.html">返回经典界面 ↗</a><div class="local"><span class="avatar">本</span><div>本地工作空间<small>{{health.ok?'后端已连接':'正在连接后端…'}}</small></div></div>
    </div>
   </aside>
   <main>
-   <header class="studio-topbar"><div>工作空间 <span>/</span> {{studioPage==='stories'?'故事创作':studioPage==='videos'?'动态视频':studioPage==='images'?'图片工作室':studioPage==='comfyui'?'ComfyUI 工作台':studioPage==='home'?'项目首页':studioPage==='logs'?'任务日志':studioPage==='plugins'?'插件与设置':studioTitle}}</div><div class="cloud-account-entry">
+   <header class="studio-topbar"><div>工作空间 <span>/</span> {{studioPage==='services'?'接口与服务':studioPage==='stories'?'故事创作':studioPage==='videos'?'动态视频':studioPage==='images'?'图片工作室':studioPage==='comfyui'?'ComfyUI 工作台':studioPage==='home'?'项目首页':studioPage==='logs'?'任务日志':studioPage==='plugins'?'插件与设置':studioTitle}}</div><div class="cloud-account-entry">
           <a
             class="cloud-website-entry"
             href="https://oneclickvidgen.com/"
@@ -54,6 +54,7 @@
    <ImageStudio v-else-if="studioPage==='images'" />
    <ComfyUIWorkbench v-else-if="studioPage==='comfyui'" />
    <section v-else-if="studioPage==='home'" class="content home">
+    <CodexBridgePanel compact @open-draft="openCodexDraft" @open-project="openCodexProject"/>
     <div class="page-heading"><div><p class="eyebrow">YOUR CREATIVE SPACE</p><h1>让想法，成为作品。</h1><p class="muted">从一段文字开始，继续上次的创作。</p></div><div class="home-creation-actions"><button class="primary" @click="newProject('dynamic')">▷ 新建动态视频</button><button @click="newProject()">＋ 新建图文视频</button></div></div>
     <div class="resume story-home-entry"><div><h3>还没有文稿？从故事开始。</h3><p>写下想法、寻找选题，或整理已有文稿，再采用到动态视频制作。</p></div><button class="primary" @click="navigateStudio('stories')">开始写故事 →</button></div>
     <div v-if="!session.user" class="resume"><div><h3>连接你的工作空间</h3><p>登录本地工作台后，查看项目并开始创作。</p></div><button @click="studioDrawer='接口与服务'">打开登录与配置</button></div>
@@ -82,6 +83,210 @@
     <TaskConsole :lines="studioTaskLogs" :diagnostic-available="!!studioJob" :diagnostic-exporting="diagnosticExporting" @export-diagnostic="exportDiagnosticPackage(studioJob)"/>
     <div class="log-help" role="status"><span>{{diagnosticMessage}}</span><button :disabled="!studioJob" @click="studioDrawer='参数回顾'">参数回顾 · 只读</button></div>
    </section>
+   <section v-else-if="studioPage==='services'" class="content services-page"><div class="page-heading"><div><h1>接口与服务</h1><p class="muted">每类服务独立配置与保存，先测试单张或单镜，再批量运行。</p></div><div class="service-header-actions"><button @click="apiGuideOpen=true">API 设置说明 ↗</button><button @click="closeServices">返回工作页面</button></div></div><nav class="services-nav" aria-label="接口分类"><button v-for="tab in [{id:'overview',label:'服务概览'},{id:'language',label:'语言模型'},{id:'images',label:'图像接口'},{id:'video',label:'视频接口'},{id:'concurrency',label:'出图并发'},{id:'tts',label:'TTS 状态'}]" :key="tab.id" :class="{active:serviceTab===tab.id}" :aria-pressed="serviceTab===tab.id" @click="serviceTab=tab.id">{{tab.label}}</button></nav><div class="studio-service-settings">
+      <div class="brand">
+        <img class="brand-mark brand-logo" src="/one-click-vidgen-logo.png" alt="One-Click VidGen Logo" />
+        <div>
+          <div class="brand-name">一键生成视频</div>
+          <div class="brand-sub">One-Click VidGen</div>
+        </div>
+      </div>
+      <button v-show="serviceTab==='overview'" class="sidebar-preflight-button" type="button" :disabled="preflightRunning || !session.user" @click="runManualPreflight">
+        <span class="sidebar-preflight-icon" aria-hidden="true">⚡</span>
+        <span>
+          <strong>{{ preflightRunning ? '正在检测…' : '启动前自动检测' }}</strong>
+          <small>API、TTS、素材与运行环境</small>
+        </span>
+      </button>
+
+      <div v-if="session.auth_mode !== 'local'" class="sidebar-card auth-card">
+        <template v-if="session.user">
+          <div class="sidebar-label">账号</div>
+          <div class="sidebar-value">{{ session.user.name }}</div>
+          <div class="muted small">{{ session.user.email }}</div>
+          <button class="ghost-btn full-btn" type="button" @click="logout">退出登录</button>
+        </template>
+        <template v-else>
+          <div class="sidebar-label">账号登录</div>
+          <div v-if="authError" class="board-error">{{ authError }}</div>
+          <form class="account-form" @submit.prevent="login">
+            <label>
+              <span>邮箱</span>
+              <input v-model="loginForm.email" type="email" autocomplete="email" required />
+            </label>
+            <label>
+              <span>密码</span>
+              <input v-model="loginForm.password" type="password" autocomplete="current-password" required />
+            </label>
+            <button class="primary-btn full-btn" type="submit">登录</button>
+          </form>
+          <form class="account-form register-form" @submit.prevent="register">
+            <div class="sidebar-label">注册</div>
+            <label>
+              <span>昵称</span>
+              <input v-model="registerForm.name" autocomplete="nickname" />
+            </label>
+            <label>
+              <span>邮箱</span>
+              <input v-model="registerForm.email" type="email" autocomplete="email" required />
+            </label>
+            <label>
+              <span>密码</span>
+              <input v-model="registerForm.password" type="password" minlength="8" autocomplete="new-password" required />
+            </label>
+            <button class="ghost-btn full-btn" type="submit">注册并登录</button>
+          </form>
+        </template>
+      </div>
+
+      <div v-if="session.user" v-show="serviceTab==='overview'" class="sidebar-card cloud-pool-priority-card" :class="{ active: form.use_cloud_image_pool }">
+        <div class="cloud-pool-toggle-row">
+          <div>
+            <div class="sidebar-label">OCV 托管服务</div>
+            <strong>使用号池</strong>
+            <small>{{ form.use_cloud_image_pool ? 'Agent 与出图均由云端号池托管' : '不会配置 API 的用户，强烈建议使用号池托管服务' }}</small>
+          </div>
+          <label class="inline-switch cloud-pool-switch" :title="cloudSession.authenticated ? '切换云端号池' : '需先登录右上角云端账户'">
+            <input v-model="form.use_cloud_image_pool" type="checkbox" />
+            <span class="switch-track"><span></span></span>
+          </label>
+        </div>
+        <p class="cloud-pool-price-note">无需自行配置语言和图像 API；其他云端服务收取 5% 服务费；ICAN 按原价向上取整到分计费。平价gpt image2.5 每张图片约 0.105 元，ICAN 每张 0.04 元（0.04 积分）；每 1000 字文案的 LLM 消耗通常约 0.1 元，实际费用会随模型、输出长度及重试次数略有浮动。</p>
+        <div v-if="form.use_cloud_image_pool"><label class="stack"><span>图片生成渠道</span><select v-model="form.method"><option value="running">稳定版</option><option value="ican">ICAN · GPT Image 2.5</option></select></label><CloudImageQuality :form="form" /></div>
+        <div v-if="form.use_cloud_image_pool" class="cloud-pool-status" :class="cloudSession.authenticated ? 'ready' : 'warning'">
+          <span v-if="cloudSession.authenticated">文本 + 图像号池已启用 · 可用积分 {{ cloudAvailableCredits }}</span>
+          <button v-else type="button" @click="openCloudLogin">请先登录云端账户</button>
+        </div>
+      </div>
+
+      <div v-if="session.user" v-show="['language','images','video','concurrency'].includes(serviceTab)" class="sidebar-card api-key-card" :class="{ 'pool-mode-active': form.use_cloud_image_pool }">
+        <div class="sidebar-label">{{{language:'语言模型 · 文案与分镜规划',images:'图像接口 · 分镜图生成与重绘',video:'视频接口 · 动态片段生成',concurrency:'出图并发 · 请求数量控制'}[serviceTab]}}</div>
+        <div class="muted small">密钥仅保存到本机 `.env`，页面不会回显原文。</div>
+        <div v-show="serviceTab==='language'" id="service-language" class="api-key-entry" :class="{ 'cloud-pool-disabled': form.use_cloud_image_pool }">
+          <LanguageModelPresets manage :cloud-pool="form.use_cloud_image_pool" />
+          <span>语言模型</span>
+          <small class="api-model-field-label">接口来源</small>
+          <select v-model="apiKeyForm.language_source" class="language-provider-select" :disabled="form.use_cloud_image_pool" @change="onLanguageSourceChanged">
+            <option value="official">官方 API</option>
+            <option value="custom">自定义兼容接口（高级）</option>
+          </select>
+          <small class="api-model-field-label">模型家族</small>
+          <select v-model="apiKeyForm.language_provider" class="language-provider-select" :disabled="form.use_cloud_image_pool" @change="onLanguageProviderChanged">
+            <option v-for="provider in visibleLanguageProviderOptions" :key="provider.value" :value="provider.value" :disabled="provider.disabled">
+              {{ provider.family_label || provider.label }}
+            </option>
+          </select>
+          <small class="api-model-field-label">Agent 模型</small>
+          <select v-if="currentLanguageModels.length && !customLanguageProvider" v-model="apiKeyForm.language_model" class="language-provider-select language-model-select" :disabled="form.use_cloud_image_pool" @change="onLanguageModelChanged">
+            <option v-for="model in currentLanguageModels" :key="model.value" :value="model.value">{{ model.label }}</option>
+          </select>
+          <input v-else v-model="apiKeyForm.language_model" class="language-model-input" name="ocv-language-model-id" type="text" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore readonly :disabled="form.use_cloud_image_pool" :placeholder="currentLanguageProvider.configured ? '已保存；不修改可留空' : '填写服务商提供的模型 ID'" @focus="unlockProtectedInput" @change="onLanguageModelChanged" />
+          <div v-if="customLanguageProvider" class="api-custom-provider-guide">
+            <strong>高级功能：仅支持 OpenAI 兼容接口</strong>
+            <label>
+              <span>API Base URL</span>
+              <input v-model="apiKeyForm.language_api_base_url" name="ocv-language-api-base-url" type="url" inputmode="url" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore readonly :placeholder="currentLanguageProvider.configured ? '已保存；不修改可留空' : '例如 https://api.example.com/v1'" @focus="unlockProtectedInput" />
+            </label>
+            <label>
+              <span>API Key（本地无鉴权可留空）</span>
+              <input v-model="apiKeyForm.language_api_key" name="ocv-language-api-secret" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore readonly :placeholder="currentLanguageProvider.configured ? '已保存；不修改可留空' : '填写服务商提供的 API Key'" @focus="unlockProtectedInput" />
+            </label>
+            <label>
+              <span>思考模式</span>
+              <select v-model="apiKeyForm.custom_llm_thinking_mode">
+                <option value="follow">跟随接口默认（推荐）</option>
+                <option value="disabled">强制关闭（DeepSeek 兼容）</option>
+                <option value="enabled">强制开启（DeepSeek 兼容）</option>
+              </select>
+            </label>
+            <small>需兼容 <code>/chat/completions</code>、具备足够上下文长度并能稳定输出 JSON。</small>
+            <small>强制开关会发送 DeepSeek 格式的 <code>thinking</code> 参数；其他模型请选择“跟随接口默认”。</small>
+            <small class="api-custom-security-note">安全提示：API Key 会随请求发送到此网址，请只填写你信任的服务地址。</small>
+            <button class="primary-btn full-btn api-inline-save" type="button" :disabled="savingApiKeys" @click="saveApiKeySettings">
+              {{ savingApiKeys ? '保存中…' : '保存语言接口设置' }}
+            </button>
+          </div>
+          <input v-else-if="apiKeyFieldOpen('language')" v-model="apiKeyForm.language_api_key" name="ocv-official-language-api-secret" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore readonly :placeholder="`${currentLanguageProviderLabel} API Key`" @focus="unlockProtectedInput" />
+          <div v-else-if="!customLanguageProvider" class="api-key-state-bar api-key-pool-state" :class="{ error: !form.use_cloud_image_pool && apiKeyRuntimeErrors.language }">
+            <div class="api-key-pool-heading">
+              <strong>{{ form.use_cloud_image_pool ? '号池已接管文本模型' : (apiKeyRuntimeErrors.language ? 'ERROR' : `${currentLanguageProviderLabel} · ${currentLanguageModelLabel}`) }}</strong>
+              <small v-if="!form.use_cloud_image_pool && apiKeyRuntimeErrors.language">{{ apiKeyRuntimeErrors.language }}</small>
+            </div>
+            <details v-if="!form.use_cloud_image_pool && !apiKeyRuntimeErrors.language && (currentLanguageProvider.key_hints || []).length" class="api-key-account-details">
+              <summary>查看已配置账号（{{ (currentLanguageProvider.key_hints || []).length }}）</summary>
+              <div class="api-key-account-list">
+                <div v-for="(hint, index) in currentLanguageProvider.key_hints || []" :key="hint + index" class="api-key-account-row">
+                  <code>{{ hint }}</code>
+                  <button type="button" class="api-key-delete-btn" :disabled="deletingApiKey" :title="`删除此 ${currentLanguageProviderLabel} API Key`" @click="deleteConfiguredApiKey('language', index)">×</button>
+                </div>
+              </div>
+            </details>
+            <button v-if="!form.use_cloud_image_pool" class="api-key-corner-add" type="button" title="添加语言模型 API Key" aria-label="添加语言模型 API Key" @click="addApiKeyAccount('language')">＋</button>
+          </div>
+          <button v-if="!customLanguageProvider && apiKeyFieldOpen('language')" class="primary-btn full-btn api-inline-save" type="button" :disabled="savingApiKeys || form.use_cloud_image_pool" @click="saveApiKeySettings">
+            {{ savingApiKeys ? '保存中…' : '保存语言接口设置' }}
+          </button>
+        </div>
+        <div v-show="serviceTab==='images'" id="service-images"><ImageProfileSelector :form="form" manage /></div>
+        <div v-show="serviceTab==='video'" id="service-video"><VideoModelSettings /></div>
+        <div v-show="serviceTab==='concurrency'" id="service-concurrency" class="image-concurrency-panel" :class="{ disabled: form.use_cloud_image_pool }">
+            <div class="image-concurrency-summary">
+              <div>
+                <strong>出图并发</strong>
+                <small v-if="form.use_cloud_image_pool">由云端号池服务器动态调度</small>
+                <small v-else>{{ imageConcurrencyPreview }}</small>
+              </div>
+              <select v-model="apiKeyForm.image_concurrency_mode" :disabled="form.use_cloud_image_pool" @change="saveImageConcurrencySettings">
+                <option value="auto">自动（推荐）</option>
+                <option value="manual">手动限制</option>
+              </select>
+            </div>
+            <details v-if="!form.use_cloud_image_pool" class="image-concurrency-details">
+              <summary>高级设置</summary>
+              <label>
+                <span>单 Key 并发</span>
+                <input v-model.number="apiKeyForm.image_per_key_concurrency" type="number" min="1" max="16" />
+              </label>
+              <label v-if="apiKeyForm.image_concurrency_mode === 'manual'">
+                <span>总并发上限</span>
+                <input v-model.number="apiKeyForm.image_total_concurrency" type="number" min="1" max="64" />
+              </label>
+              <button type="button" class="ghost-btn image-concurrency-save" :disabled="savingImageConcurrency" @click="saveImageConcurrencySettings">
+                {{ savingImageConcurrency ? '保存中…' : '保存并发设置' }}
+              </button>
+              <small>三方接口通常保持单 Key 并发 1；官方或高并发接口可按服务商额度提高。</small>
+            </details>
+        </div>
+        <div class="muted small">{{ form.use_cloud_image_pool ? '号池模式不需要填写个人的语言或图像 API Key；视频号池尚未接入。' : 'OCV 不指定或推荐第三方接口；请自行选择服务商，并只向可信地址发送 API Key。' }}</div>
+        <div v-if="apiKeyMessage" class="api-key-message">{{ apiKeyMessage }}</div>
+      </div>
+
+      <div v-show="serviceTab==='tts'" id="service-tts" class="sidebar-card">
+        <div class="sidebar-label">TTS 引擎</div>
+        <div class="sidebar-value">{{ ttsStatusText }}</div>
+        <div class="muted small">{{ health.tts_provider || 'TTS' }}</div>
+        <div class="muted small">当前音色: {{ form.tts_voice_id.startsWith('upload:') ? (ttsVoiceUploadName || '本地上传音色') : voiceLabel(form.tts_voice_id) }}</div>
+        <button class="ghost-btn full-btn" type="button" :disabled="startingTts || health.tts_online || !session.user" @click="startTts">
+          {{ startingTts ? '检测中...' : '重新检测' }}
+        </button>
+      </div>
+      <button
+        class="sidebar-secondary-entry sidebar-plugin-entry"
+        type="button"
+        :class="{ active: activePage === 'plugins' }"
+        @click="openPluginsPage"
+      >
+        扩展与插件
+      </button>
+      <button
+        class="sidebar-secondary-entry"
+        type="button"
+        :class="{ active: activePage === 'development' }"
+        @click="activePage = 'development'"
+      >
+        待开发功能
+      </button>
+    </div></section>
    <section v-else-if="studioPage==='plugins'" class="content"><section  class="plugins-page stack">
           <article class="panel plugins-hero">
             <div>
@@ -176,7 +381,7 @@
                     <strong>{{ plugin.name }}</strong>
                     <span>v{{ plugin.version }} · {{ plugin.author }}</span>
                   </div>
-                  <label class="inline-switch plugin-toggle" :title="plugin.valid ? '记录插件启用状态；当前框架不会执行插件代码' : '清单无效，无法启用'">
+                  <label class="inline-switch plugin-toggle" :title="plugin.valid ? (plugin.framework_only ? '仅记录启用状态' : '启用或停用此插件功能') : '清单无效，无法启用'">
                     <input :checked="plugin.enabled" type="checkbox" :disabled="!plugin.valid || pluginToggling === plugin.folder" @change="togglePlugin(plugin)" />
                     <span class="switch-track"><span></span></span>
                   </label>
@@ -185,10 +390,11 @@
                 <div class="plugin-meta">
                   <span>类型：{{ plugin.type }}</span>
                   <span v-if="plugin.ocv_version">OCV：{{ plugin.ocv_version }}</span>
-                  <span>{{ plugin.enabled ? '已启用（仅记录）' : '已停用' }}</span>
+                  <span>{{ plugin.enabled ? (plugin.framework_only ? '已启用（仅记录）' : '已启用') : '已停用' }}</span>
                 </div>
                 <div v-if="plugin.permissions?.length" class="plugin-permissions">声明权限：{{ plugin.permissions.join('、') }}</div>
                 <div v-if="plugin.issue" class="board-error">清单错误：{{ plugin.issue }}</div>
+                <CodexBridgePanel v-if="plugin.id==='codex_bridge' && plugin.enabled && plugin.valid" @open-draft="openCodexDraft" @open-project="openCodexProject"/>
               </article>
             </div>
 
@@ -204,7 +410,8 @@
     </nav>
     <StorySourcePanel :handoff="draftStoryHandoff(form)" />
     <SpeechModeSelector v-if="studioKind==='video'&&form.dynamic_video&&!form._rerun_source_project" :form="form" :disabled="studioBusy" />
-    <div class="page-heading"><div><p class="eyebrow">{{form.dynamic_video?'NEW DYNAMIC VIDEO':'NEW PROJECT'}}</p><h1>{{form.dynamic_video?(['dialogue','mixed'].includes(form.speech_mode)?'让故事中的角色开口说话。':'从声音开始，让画面动起来。'):studioKind==='video'?'从文字，开始一部作品。':studioKind==='audio'?'让文字，有自己的声音。':'让每一句话，都清晰可见。'}}</h1><p class="muted">{{studioSaveState}}</p></div><button @click="studioDrawer='我的预设'">预设 · {{selectedParameterPreset||'选择预设'}}⌄</button></div>
+    <div class="page-heading creation-heading-compact"><div><p class="eyebrow">{{form.dynamic_video?'NEW DYNAMIC VIDEO':'NEW PROJECT'}}</p><h1>{{form.dynamic_video?(['dialogue','mixed'].includes(form.speech_mode)?'让故事中的角色开口说话。':'从声音开始，让画面动起来。'):studioKind==='video'?'从文字，开始一部作品。':studioKind==='audio'?'让文字，有自己的声音。':'让每一句话，都清晰可见。'}}</h1><p class="muted">{{studioSaveState}}</p></div><button @click="studioDrawer='我的预设'">预设 · {{selectedParameterPreset||'选择预设'}}⌄</button></div>
+    <LanguageModelPresets v-if="studioKind!=='subtitle'" :disabled="studioBusy" :cloud-pool="form.use_cloud_image_pool"/>
     <template v-if="studioKind!=='subtitle'"><div class="create-copy-column">
             <div class="form-grid">
               <label class="project-name-field">
@@ -358,6 +565,7 @@
     <template v-else-if="studioTab==='素材'"><p class="muted">当前任务已创建，替换素材请新建字幕识别任务。</p><button @click="newProject('subtitle')">新建字幕任务</button></template>
     <template v-else-if="studioTab==='配音'">
      <button v-if="studioJob?.request?.dynamic_video" class="primary-btn" :disabled="studioBusy||ttsEditor.task?.status==='running'" @click="enterDynamicStoryboard">保存配音编辑，返回动态分镜 →</button>
+     <button v-if="codexBridgeAvailable && studioJob?.request?.dynamic_video && guidedStage==='audio_review' && !editingDynamicAudio" :disabled="studioBusy||guidedSubtitleSaving||ttsEditor.task?.status==='running'" @click="handoffToCodex">确认配音，交给 Codex 规划</button>
      <div class="studio-audio-player"><audio v-if="studioAudio" :src="studioAudio" controls preload="metadata"/><p v-else class="muted">{{studioJob?.message||'音频生成后可在此试听'}}</p></div>
      <div class="studio-audio-layout"><aside class="studio-sentence-list"><div class="list-heading">全部句子 <span>{{ttsEditor.segments.length}} 句</span></div><div v-for="segment in ttsEditor.segments" :key="segment.index" :class="{selected:studioSentence===segment.index}"><input v-model="selectedTtsSegmentIndices" type="checkbox" :value="segment.index" :aria-label="'选中第'+segment.index+'句'"/><button @click="studioSentence=segment.index"><small>{{segment.index}}</small><span>{{segment.text}}</span><small>{{Number(segment.duration).toFixed(1)}}s</small></button></div></aside><div class="studio-sentence-detail"><section class="tts-segment-editor">
                 <div class="visual-timing-head">
@@ -432,7 +640,7 @@
                         <template v-if="isTtsPronunciationOpen(item.index)">
                           <div class="tts-pronunciation-editor">
                             <label>
-                              <span>朗读文本 <small>可单独修正发音；如需同步显示文字，请勾选下方选项</small></span>
+                              <span>朗读文本 <small>仅修正发音时无需同步字幕</small></span>
                               <textarea
                                 :value="ttsReadingDrafts[item.index]"
                                 rows="2"
@@ -449,12 +657,12 @@
                               @click="resetTtsReadingDraft(item)"
                             >恢复原文</button>
                           </div>
-                          <label v-if="visualEditor.timing_available" class="tts-subtitle-sync-toggle" :class="{ disabled: !isTtsReadingModified(item) }">
+                          <label class="tts-subtitle-sync-toggle" :class="{ disabled: !isTtsReadingModified(item) }">
                             <input v-model="ttsEditor.subtitle_sync_indices" type="checkbox" :value="item.index" :disabled="ttsEditor.task?.status === 'running' || !isTtsReadingModified(item)" />
                             <span>同时修改字幕</span>
                             <small>重配成功后自动同步并保存这句显示文字</small>
                           </label>
-                          <small class="tts-subtitle-preview">成片字幕保持：{{ item.text }}</small>
+                          <small class="tts-subtitle-preview">{{ (ttsEditor.subtitle_sync_indices || []).includes(item.index) ? '重配成功后字幕将同步为：' + (ttsReadingDrafts[item.index] || item.text) : '成片字幕保持：' + item.text }}</small>
                         </template>
                       </div>
                       <div v-if="item.index < ttsEditor.segments.length" class="tts-boundary-row">
@@ -478,12 +686,15 @@
               </section></div></div>
     </template>
     <template v-else-if="studioTab==='画面与字幕'">
+     <OperationStatus title="画面处理状态" :task="visualEditor.has_active_image_tasks?{status:'running',message:'图片正在后台处理，可切换画面查看各图状态'}:visualEditor.task" :summary="`处理中 ${visualEditor.items.filter(item=>item.task?.status==='running').length} 张`"><button type="button" @click="openLogs()">查看详细日志</button></OperationStatus>
      <div v-if="!visualEditor.items.length" class="empty">{{visualEditor.task?.message||'画面生成后，将在这里显示可编辑内容。'}}</div>
-     <div v-else class="studio-visual-layout"><aside class="studio-shot-list"><div class="list-heading">画面 <span>{{visualEditor.items.length}} 张</span></div><button v-for="item in visualEditor.items" :key="item.id" :class="{selected:studioSelectedImage?.id===item.id}" @click="visualTimingSelectedId=item.id"><img :src="item.image_url" :alt="item.id"/><span><b>{{item.id}}</b><small>{{formatTimingRange(item.timing)}}</small></span></button></aside><div class="studio-shot-detail"><div class="visual-image-grid">
-                <SceneAssets v-if="visualEditorProjectId" :job-id="visualEditorProjectId" />
+     <ResizableShotWorkspace v-else class="studio-visual-layout" scope="illustrated-visuals"><template #sidebar><aside class="studio-shot-list"><div class="list-heading">画面 <span>{{visualEditor.items.length}} 张</span></div><button v-for="scene in studioSceneAssets" :key="scene.id" :class="{selected:studioSelectedImage?.id===scene.id}" @click="visualTimingSelectedId=scene.id"><img :src="scene.image_url" alt=""/><span><b>{{scene.display_name}}</b><small>参考资产 · 不占时长</small></span></button><button v-for="item in visualEditor.items" :key="item.id" :class="{selected:studioSelectedImage?.id===item.id}" @click="visualTimingSelectedId=item.id"><img :src="item.image_url" :alt="item.id"/><span><b>{{item.id}}</b><small>{{formatTimingRange(item.timing)}}</small></span></button></aside></template><div class="studio-shot-detail"><div class="visual-image-grid">
                 <article v-for="item in studioSelectedImage ? [studioSelectedImage] : []" :key="item.id" class="visual-image-card" :class="{ processing: item.task?.status === 'running' }">
+                 <OperationStatus title="本图运行状态" :task="item.task"/>
+                 <WorkspacePanels scope="illustrated-visuals" :log-count="studioTaskLogs.length">
+                  <template #preview>
                   <div class="visual-image-actions">
-                    <strong>{{ item.id }}</strong>
+                    <strong>{{ item.display_name||item.id }}</strong>
                     <label class="visual-redraw-resolution" title="仅用于重绘本图，不改变接口服务中的全局分辨率">
                       <span>分辨率</span>
                       <select :value="item.redraw_resolution ?? ''" :disabled="item.task?.status === 'running'" :aria-label="item.id+' 重绘分辨率'" @change="item.redraw_resolution = $event.target.value">
@@ -507,11 +718,11 @@
                       ▣<input type="file" multiple accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" @change="uploadVisualReferenceImages($event, item.id)" />
                     </label>
                     <button type="button" class="icon-action" title="撤回图片" aria-label="撤回图片" :disabled="item.task?.status === 'running'" @click="undoVisualImage(item)">↶</button>
-                    <button type="button" class="icon-action" title="重置提示词" aria-label="重置提示词" :disabled="item.task?.status === 'running'" @click="resetVisualImagePrompt(item)">↺</button>
+                    <button v-if="!item.is_scene" type="button" class="icon-action" title="重置提示词" aria-label="重置提示词" :disabled="item.task?.status === 'running'" @click="resetVisualImagePrompt(item)">↺</button>
                     <label class="icon-action replace-action" title="替换本地图片" aria-label="替换本地图片">
                       ↕<input type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" @change="uploadVisualImage($event, item)" />
                     </label>
-                    <button type="button" class="icon-action commit-baseline-action" title="将当前图片和提示词确认为新的原图" aria-label="确认当前图片为新的原图" :disabled="item.task?.status === 'running'" @click="commitVisualBaseline(item)">✅</button>
+                    <button v-if="!item.is_scene" type="button" class="icon-action commit-baseline-action" title="将当前图片和提示词确认为新的原图" aria-label="确认当前图片为新的原图" :disabled="item.task?.status === 'running'" @click="commitVisualBaseline(item)">✅</button>
                   </div>
                   <div v-if="visualReferenceOwnerMacroId === item.id && (visualSelfReferenceMacroId || visualReferenceUploads.length)" class="visual-reference-summary">
                     <span class="visual-reference-title">本次重绘参考</span>
@@ -525,9 +736,10 @@
                     <small>取消勾选仅影响本次重绘；上传新的重绘参考图可替代原参考组合，不影响其他镜头。</small>
                   </div>
                   <div v-if="item.reference_materials?.length" class="visual-reference-summary">
-                    <span>本图使用的参考素材</span>
-                    <button v-for="reference in item.reference_materials" :key="reference.label" type="button" :title="reference.description" @click="visualPreviewItem={id:reference.label,image_url:reference.image_url}"><img :src="reference.image_url" :alt="reference.label" style="width:36px;height:28px;object-fit:contain"/>{{ reference.label }}</button>
+                    <span>本图使用的参考素材 · 按提交顺序</span>
+                    <button v-for="(reference,index) in item.reference_materials" :key="reference.label" type="button" :title="reference.description" @click="visualPreviewItem={id:reference.label,image_url:reference.image_url}"><img :src="reference.image_url" :alt="reference.label" style="width:100px;height:75px;object-fit:contain"/>图{{index+1}} · {{ reference.description||reference.label }}</button>
                   </div>
+                  <p v-if="!item.reference_materials?.length&&!item.scene_reference_url" class="muted">本图未记录参考素材，按提示词生成；旧项目可能未保存参考记录。</p>
                   <div class="visual-image-preview-shell">
                     <button class="visual-image-preview" type="button" title="点击放大图片" @click="visualPreviewItem = item">
                       <img :src="item.image_url" :alt="item.id" />
@@ -538,16 +750,19 @@
                     <button class="visual-image-nav visual-image-nav-prev" type="button" :disabled="!canSelectPreviousImage" title="前一个画面" aria-label="前一个画面" @click="selectAdjacentVisualImage(-1)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg></button>
                     <button class="visual-image-nav visual-image-nav-next" type="button" :disabled="!canSelectNextImage" title="后一个画面" aria-label="后一个画面" @click="selectAdjacentVisualImage(1)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7" /></svg></button>
                   </div>
+                  </template>
+                  <template #prompts>
                   <label class="stack compact-stack">
                     <span>提示词</span>
                     <textarea v-model="item.prompt" rows="3" maxlength="12000"></textarea>
                   </label>
                   <label class="stack compact-stack">
-                    <span>对应文案（暂只读）</span>
+                    <span>{{item.is_scene?'场景说明':'对应文案（暂只读）'}}</span>
                     <textarea :value="item.text" rows="2" readonly></textarea>
                   </label>
-                </article>
-              </div><section class="visual-timing-panel" :class="{ locked: ttsEditor.task?.status === 'running' }">
+                  </template>
+                  <template #logs><TaskConsole :lines="studioTaskLogs" compact :diagnostic-available="!!studioJob" :diagnostic-exporting="diagnosticExporting" @export-diagnostic="exportDiagnosticPackage(studioJob)"/><p v-if="diagnosticMessage" class="muted" role="status">{{diagnosticMessage}}</p></template>
+                  <template #subtitles><section v-if="!item.is_scene" class="visual-timing-panel" :class="{ locked: ttsEditor.task?.status === 'running' }">
                 <div class="visual-timing-head">
                   <div>
                     <div class="eyebrow">画面时序</div>
@@ -590,7 +805,7 @@
                       :class="{ selected: visualTimingSelectedId === item.id }"
                       @click="visualTimingSelectedId = item.id"
                     >
-                      <strong>{{ item.id }}</strong>
+                      <strong>{{ item.display_name||item.id }}</strong>
                       <span>{{ formatTimingRange(item.timing) }}</span>
                       <small>{{ item.timing?.sentences?.length || 0 }} 句</small>
                     </button>
@@ -717,7 +932,7 @@
                     </template>
                   </div>
                 </template>
-              </section></div></div>
+              </section></template></WorkspacePanels></article></div></div></ResizableShotWorkspace>
     </template>
     <template v-else-if="studioTab==='字幕'">
      <audio v-if="studioAudio" :src="studioAudio" controls/>
@@ -725,7 +940,7 @@
      <div class="studio-subtitle-list"><div v-for="(row,i) in studioSubtitles" :key="i"><span>{{i+1}}</span><label>开始（秒）<input v-model.number="row.start" type="number" min="0" step="0.1"/></label><label>结束（秒）<input v-model.number="row.end" type="number" min="0" step="0.1"/></label><textarea v-model="row.text" rows="2"/></div></div><p v-if="!studioSubtitles.length" class="muted">{{studioSubtitleMessage||'识别完成后可在这里校对字幕。'}}</p><button v-if="studioSubtitles.length" class="primary" @click="exportStudioSubtitles">导出校对字幕</button><p>{{studioSubtitleMessage}}</p>
     </template>
     <template v-else-if="studioTab==='导出'">
-<div class="studio-export"><div><video v-if="studioKind==='video'&&studioVideo" controls :src="studioVideo" preload="metadata"/><audio v-else-if="studioAudio" controls :src="studioAudio"/><div v-else class="empty">生成完成后，可以在这里预览作品。</div><button v-if="studioJob?.status==='completed'" @click="openProjectOutputFolder(studioJob.id)">打开项目输出目录</button><small v-if="studioJob?.status==='completed'" class="muted">包含成片、文案、配音、图片、字幕、提示词和重绘历史。</small></div><div class="studio-export-controls"><h2>导出设置</h2><button v-if="studioKind==='video'" @click="studioDrawer='背景音乐'">背景音乐与音量 →</button><template v-if="studioKind==='video'"><div
+<OperationStatus title="合成状态" :task="visualEditor.task"/><div class="studio-export"><div><video v-if="studioKind==='video'&&studioVideo" controls :src="studioVideo" preload="metadata"/><audio v-else-if="studioAudio" controls :src="studioAudio"/><div v-else class="empty">生成完成后，可以在这里预览作品。</div><button v-if="studioJob?.status==='completed'" @click="openProjectOutputFolder(studioJob.id)">打开项目输出目录</button><small v-if="studioJob?.status==='completed'" class="muted">包含成片、文案、配音、图片、字幕、提示词和重绘历史。</small></div><div class="studio-export-controls"><h2>导出设置</h2><button v-if="studioKind==='video'" @click="studioDrawer='背景音乐'">背景音乐与音量 →</button><template v-if="studioKind==='video'"><div
                 v-if="!(form.step_mode && isGuidedWorkflowJob(activeJob) && activeJob?.id === visualEditorProjectId && guidedStage !== 'completed')"
                 class="visual-render-footer"
               >
@@ -803,7 +1018,10 @@
               <button v-else-if="guidedStage === 'audio_setup'" class="primary-btn guided-primary-action" type="button" :disabled="!canSubmitGeneration" @click="submit">
                 {{ submitting ? '正在提交…' : '开始生成配音与字幕' }}
               </button>
-              <button v-else-if="guidedStage === 'audio_review' && studioJob?.request?.dynamic_video" class="primary-btn guided-primary-action" type="button" :disabled="studioBusy || guidedSubtitleSaving || ttsEditor.task?.status === 'running'" @click="enterDynamicStoryboard">确认配音与字幕，进入动态分镜 →</button>
+              <div v-else-if="guidedStage === 'audio_review' && studioJob?.request?.dynamic_video" class="bridge-tools">
+                <button class="primary-btn guided-primary-action" type="button" :disabled="studioBusy || guidedSubtitleSaving || ttsEditor.task?.status === 'running'" @click="enterDynamicStoryboard">确认配音与字幕，进入自动分镜 →</button>
+                <button v-if="codexBridgeAvailable" type="button" :disabled="studioBusy || guidedSubtitleSaving || ttsEditor.task?.status === 'running'" @click="handoffToCodex">确认配音，交给 Codex 规划</button>
+              </div>
               <button v-else-if="guidedStage === 'audio_review'" class="primary-btn guided-primary-action" type="button" :disabled="guidedAdvancing || guidedSubtitleSaving || ttsEditor.task?.status === 'running'" @click="advanceGuidedWorkflow('confirm_audio')">
                 {{ guidedAdvancing ? '正在确认…' : '确认配音与字幕' }}
               </button>
@@ -832,7 +1050,7 @@
             <small>{{ activeJob?.message || '正在处理当前阶段' }} · {{ activeJob?.progress || 0 }}%</small>
           </div>
         </section>
-<div class="task-strip"><button @click="studioLogsOpen=!studioLogsOpen">{{studioLogsOpen?'⌄':'›'}} 任务日志</button><span class="muted">{{studioJob?.message}} · {{studioJob?.progress||0}}%</span><span class="tab-spacer"/><button v-if="['running','queued'].includes(studioJob?.status)" @click="studioKind==='audio'?cancelModule1():studioKind==='subtitle'?cancelSubtitleJob():cancelGeneration()">停止任务</button><button @click="openLogs()">查看完整日志 ↗</button></div><TaskConsole v-if="studioLogsOpen" :lines="studioTaskLogs" compact :diagnostic-available="!!studioJob" :diagnostic-exporting="diagnosticExporting" @export-diagnostic="exportDiagnosticPackage(studioJob)"/><p v-if="studioLogsOpen && diagnosticMessage" class="muted" role="status">{{diagnosticMessage}}</p>
+<div class="task-strip"><button v-if="studioTab!=='画面与字幕'||!visualEditor.items.length" @click="studioLogsOpen=!studioLogsOpen">{{studioLogsOpen?'⌄':'›'}} 任务日志</button><span class="muted">{{studioJob?.message}} · {{studioJob?.progress||0}}%</span><span class="tab-spacer"/><button v-if="['running','queued'].includes(studioJob?.status)" @click="studioKind==='audio'?cancelModule1():studioKind==='subtitle'?cancelSubtitleJob():cancelGeneration()">停止任务</button><button @click="openLogs()">查看完整日志 ↗</button></div><TaskConsole v-if="studioLogsOpen&&(studioTab!=='画面与字幕'||!visualEditor.items.length)" :lines="studioTaskLogs" compact :diagnostic-available="!!studioJob" :diagnostic-exporting="diagnosticExporting" @export-diagnostic="exportDiagnosticPackage(studioJob)"/><p v-if="studioLogsOpen && diagnosticMessage&&(studioTab!=='画面与字幕'||!visualEditor.items.length)" class="muted" role="status">{{diagnosticMessage}}</p>
    </section>
 <footer class="legal-footer" aria-label="开源许可证与官方源码">
         <strong class="official-disclaimer">
@@ -846,210 +1064,9 @@
         <a href="https://github.com/IFRIT-Zhou/One-Click-VidGen/blob/main/TRADEMARKS.md" target="_blank" rel="noopener noreferrer">品牌规则</a>
       </footer>
   </main>
+  <ApiSetupGuide v-if="apiGuideOpen" @close="apiGuideOpen=false"/>
   <div v-if="studioDrawer" class="drawer-backdrop" @click.self="studioDrawer=''"><aside class="drawer"><header><div><p class="eyebrow">WORKSPACE SETTINGS</p><h2>{{studioDrawer}}</h2></div><button aria-label="关闭设置" :disabled="voiceAdoptionPending" @click="studioDrawer=''">×</button></header><div class="drawer-body">
-   <template v-if="studioDrawer==='接口与服务'"><div class="studio-service-settings">
-      <div class="brand">
-        <img class="brand-mark brand-logo" src="/one-click-vidgen-logo.png" alt="One-Click VidGen Logo" />
-        <div>
-          <div class="brand-name">一键生成视频</div>
-          <div class="brand-sub">One-Click VidGen</div>
-        </div>
-      </div>
-      <button class="sidebar-preflight-button" type="button" :disabled="preflightRunning || !session.user" @click="runManualPreflight">
-        <span class="sidebar-preflight-icon" aria-hidden="true">⚡</span>
-        <span>
-          <strong>{{ preflightRunning ? '正在检测…' : '启动前自动检测' }}</strong>
-          <small>API、TTS、素材与运行环境</small>
-        </span>
-      </button>
-
-      <div v-if="session.auth_mode !== 'local'" class="sidebar-card auth-card">
-        <template v-if="session.user">
-          <div class="sidebar-label">账号</div>
-          <div class="sidebar-value">{{ session.user.name }}</div>
-          <div class="muted small">{{ session.user.email }}</div>
-          <button class="ghost-btn full-btn" type="button" @click="logout">退出登录</button>
-        </template>
-        <template v-else>
-          <div class="sidebar-label">账号登录</div>
-          <div v-if="authError" class="board-error">{{ authError }}</div>
-          <form class="account-form" @submit.prevent="login">
-            <label>
-              <span>邮箱</span>
-              <input v-model="loginForm.email" type="email" autocomplete="email" required />
-            </label>
-            <label>
-              <span>密码</span>
-              <input v-model="loginForm.password" type="password" autocomplete="current-password" required />
-            </label>
-            <button class="primary-btn full-btn" type="submit">登录</button>
-          </form>
-          <form class="account-form register-form" @submit.prevent="register">
-            <div class="sidebar-label">注册</div>
-            <label>
-              <span>昵称</span>
-              <input v-model="registerForm.name" autocomplete="nickname" />
-            </label>
-            <label>
-              <span>邮箱</span>
-              <input v-model="registerForm.email" type="email" autocomplete="email" required />
-            </label>
-            <label>
-              <span>密码</span>
-              <input v-model="registerForm.password" type="password" minlength="8" autocomplete="new-password" required />
-            </label>
-            <button class="ghost-btn full-btn" type="submit">注册并登录</button>
-          </form>
-        </template>
-      </div>
-
-      <div v-if="session.user" class="sidebar-card cloud-pool-priority-card" :class="{ active: form.use_cloud_image_pool }">
-        <div class="cloud-pool-toggle-row">
-          <div>
-            <div class="sidebar-label">OCV 托管服务</div>
-            <strong>使用号池</strong>
-            <small>{{ form.use_cloud_image_pool ? 'Agent 与出图均由云端号池托管' : '不会配置 API 的用户，强烈建议使用号池托管服务' }}</small>
-          </div>
-          <label class="inline-switch cloud-pool-switch" :title="cloudSession.authenticated ? '切换云端号池' : '需先登录右上角云端账户'">
-            <input v-model="form.use_cloud_image_pool" type="checkbox" />
-            <span class="switch-track"><span></span></span>
-          </label>
-        </div>
-        <p class="cloud-pool-price-note">无需自行配置语言和图像 API；OCV 仅收取 5% 服务费。按当前价格，每张图片约 0.105 元；每 1000 字文案的 LLM 消耗通常约 0.1 元，实际费用会随模型、输出长度及重试次数略有浮动。</p>
-        <div v-if="form.use_cloud_image_pool" class="cloud-pool-status" :class="cloudSession.authenticated ? 'ready' : 'warning'">
-          <span v-if="cloudSession.authenticated">文本 + 图像号池已启用 · 可用积分 {{ cloudAvailableCredits }}</span>
-          <button v-else type="button" @click="openCloudLogin">请先登录云端账户</button>
-        </div>
-      </div>
-
-      <div v-if="session.user" class="sidebar-card api-key-card" :class="{ 'pool-mode-active': form.use_cloud_image_pool }">
-        <div class="sidebar-label">模型 API Key</div>
-        <div class="muted small">密钥仅保存到本机 `.env`，页面不会回显原文。</div>
-        <div class="api-key-entry" :class="{ 'cloud-pool-disabled': form.use_cloud_image_pool }">
-          <span>语言模型</span>
-          <small class="api-model-field-label">接口来源</small>
-          <select v-model="apiKeyForm.language_source" class="language-provider-select" :disabled="form.use_cloud_image_pool" @change="onLanguageSourceChanged">
-            <option value="official">官方 API</option>
-            <option value="custom">自定义兼容接口（高级）</option>
-          </select>
-          <small class="api-model-field-label">模型家族</small>
-          <select v-model="apiKeyForm.language_provider" class="language-provider-select" :disabled="form.use_cloud_image_pool" @change="onLanguageProviderChanged">
-            <option v-for="provider in visibleLanguageProviderOptions" :key="provider.value" :value="provider.value" :disabled="provider.disabled">
-              {{ provider.family_label || provider.label }}
-            </option>
-          </select>
-          <small class="api-model-field-label">Agent 模型</small>
-          <select v-if="currentLanguageModels.length && !customLanguageProvider" v-model="apiKeyForm.language_model" class="language-provider-select language-model-select" :disabled="form.use_cloud_image_pool" @change="onLanguageModelChanged">
-            <option v-for="model in currentLanguageModels" :key="model.value" :value="model.value">{{ model.label }}</option>
-          </select>
-          <input v-else v-model="apiKeyForm.language_model" class="language-model-input" name="ocv-language-model-id" type="text" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore readonly :disabled="form.use_cloud_image_pool" :placeholder="currentLanguageProvider.configured ? '已保存；不修改可留空' : '填写服务商提供的模型 ID'" @focus="unlockProtectedInput" @change="onLanguageModelChanged" />
-          <div v-if="customLanguageProvider" class="api-custom-provider-guide">
-            <strong>高级功能：仅支持 OpenAI 兼容接口</strong>
-            <label>
-              <span>API Base URL</span>
-              <input v-model="apiKeyForm.language_api_base_url" name="ocv-language-api-base-url" type="url" inputmode="url" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore readonly :placeholder="currentLanguageProvider.configured ? '已保存；不修改可留空' : '例如 https://api.example.com/v1'" @focus="unlockProtectedInput" />
-            </label>
-            <label>
-              <span>API Key（本地无鉴权可留空）</span>
-              <input v-model="apiKeyForm.language_api_key" name="ocv-language-api-secret" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore readonly :placeholder="currentLanguageProvider.configured ? '已保存；不修改可留空' : '填写服务商提供的 API Key'" @focus="unlockProtectedInput" />
-            </label>
-            <label>
-              <span>思考模式</span>
-              <select v-model="apiKeyForm.custom_llm_thinking_mode">
-                <option value="follow">跟随接口默认（推荐）</option>
-                <option value="disabled">强制关闭（DeepSeek 兼容）</option>
-                <option value="enabled">强制开启（DeepSeek 兼容）</option>
-              </select>
-            </label>
-            <small>需兼容 <code>/chat/completions</code>、具备足够上下文长度并能稳定输出 JSON。</small>
-            <small>强制开关会发送 DeepSeek 格式的 <code>thinking</code> 参数；其他模型请选择“跟随接口默认”。</small>
-            <small class="api-custom-security-note">安全提示：API Key 会随请求发送到此网址，请只填写你信任的服务地址。</small>
-            <button class="primary-btn full-btn api-inline-save" type="button" :disabled="savingApiKeys" @click="saveApiKeySettings">
-              {{ savingApiKeys ? '保存中…' : '保存语言接口设置' }}
-            </button>
-          </div>
-          <input v-else-if="apiKeyFieldOpen('language')" v-model="apiKeyForm.language_api_key" name="ocv-official-language-api-secret" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore readonly :placeholder="`${currentLanguageProviderLabel} API Key`" @focus="unlockProtectedInput" />
-          <div v-else-if="!customLanguageProvider" class="api-key-state-bar api-key-pool-state" :class="{ error: !form.use_cloud_image_pool && apiKeyRuntimeErrors.language }">
-            <div class="api-key-pool-heading">
-              <strong>{{ form.use_cloud_image_pool ? '号池已接管文本模型' : (apiKeyRuntimeErrors.language ? 'ERROR' : `${currentLanguageProviderLabel} · ${currentLanguageModelLabel}`) }}</strong>
-              <small v-if="!form.use_cloud_image_pool && apiKeyRuntimeErrors.language">{{ apiKeyRuntimeErrors.language }}</small>
-            </div>
-            <details v-if="!form.use_cloud_image_pool && !apiKeyRuntimeErrors.language && (currentLanguageProvider.key_hints || []).length" class="api-key-account-details">
-              <summary>查看已配置账号（{{ (currentLanguageProvider.key_hints || []).length }}）</summary>
-              <div class="api-key-account-list">
-                <div v-for="(hint, index) in currentLanguageProvider.key_hints || []" :key="hint + index" class="api-key-account-row">
-                  <code>{{ hint }}</code>
-                  <button type="button" class="api-key-delete-btn" :disabled="deletingApiKey" :title="`删除此 ${currentLanguageProviderLabel} API Key`" @click="deleteConfiguredApiKey('language', index)">×</button>
-                </div>
-              </div>
-            </details>
-            <button v-if="!form.use_cloud_image_pool" class="api-key-corner-add" type="button" title="添加语言模型 API Key" aria-label="添加语言模型 API Key" @click="addApiKeyAccount('language')">＋</button>
-          </div>
-          <button v-if="!customLanguageProvider && apiKeyFieldOpen('language')" class="primary-btn full-btn api-inline-save" type="button" :disabled="savingApiKeys || form.use_cloud_image_pool" @click="saveApiKeySettings">
-            {{ savingApiKeys ? '保存中…' : '保存语言接口设置' }}
-          </button>
-        </div>
-        <ImageProfileSelector :form="form" manage />
-        <VideoModelSettings v-if="!form.use_cloud_image_pool" />
-        <div class="image-concurrency-panel" :class="{ disabled: form.use_cloud_image_pool }">
-            <div class="image-concurrency-summary">
-              <div>
-                <strong>出图并发</strong>
-                <small v-if="form.use_cloud_image_pool">由云端号池服务器动态调度</small>
-                <small v-else>{{ imageConcurrencyPreview }}</small>
-              </div>
-              <select v-model="apiKeyForm.image_concurrency_mode" :disabled="form.use_cloud_image_pool" @change="saveImageConcurrencySettings">
-                <option value="auto">自动（推荐）</option>
-                <option value="manual">手动限制</option>
-              </select>
-            </div>
-            <details v-if="!form.use_cloud_image_pool" class="image-concurrency-details">
-              <summary>高级设置</summary>
-              <label>
-                <span>单 Key 并发</span>
-                <input v-model.number="apiKeyForm.image_per_key_concurrency" type="number" min="1" max="16" />
-              </label>
-              <label v-if="apiKeyForm.image_concurrency_mode === 'manual'">
-                <span>总并发上限</span>
-                <input v-model.number="apiKeyForm.image_total_concurrency" type="number" min="1" max="64" />
-              </label>
-              <button type="button" class="ghost-btn image-concurrency-save" :disabled="savingImageConcurrency" @click="saveImageConcurrencySettings">
-                {{ savingImageConcurrency ? '保存中…' : '保存并发设置' }}
-              </button>
-              <small>三方接口通常保持单 Key 并发 1；官方或高并发接口可按服务商额度提高。</small>
-            </details>
-        </div>
-        <div class="muted small">{{ form.use_cloud_image_pool ? '号池模式不需要填写个人的语言或图像 API Key；视频号池尚未接入。' : 'OCV 不指定或推荐第三方接口；请自行选择服务商，并只向可信地址发送 API Key。' }}</div>
-        <div v-if="apiKeyMessage" class="api-key-message">{{ apiKeyMessage }}</div>
-      </div>
-
-      <div class="sidebar-card">
-        <div class="sidebar-label">TTS 引擎</div>
-        <div class="sidebar-value">{{ ttsStatusText }}</div>
-        <div class="muted small">{{ health.tts_provider || 'TTS' }}</div>
-        <div class="muted small">当前音色: {{ form.tts_voice_id.startsWith('upload:') ? (ttsVoiceUploadName || '本地上传音色') : voiceLabel(form.tts_voice_id) }}</div>
-        <button class="ghost-btn full-btn" type="button" :disabled="startingTts || health.tts_online || !session.user" @click="startTts">
-          {{ startingTts ? '检测中...' : '重新检测' }}
-        </button>
-      </div>
-      <button
-        class="sidebar-secondary-entry sidebar-plugin-entry"
-        type="button"
-        :class="{ active: activePage === 'plugins' }"
-        @click="openPluginsPage"
-      >
-        扩展与插件
-      </button>
-      <button
-        class="sidebar-secondary-entry"
-        type="button"
-        :class="{ active: activePage === 'development' }"
-        @click="activePage = 'development'"
-      >
-        待开发功能
-      </button>
-    </div></template>
-   <template v-else-if="studioDrawer==='重配参数'"><div class="tts-refine-parameter-panel" :class="{ locked: ttsEditor.task?.status === 'running' }">
+   <template v-if="studioDrawer==='重配参数'"><div class="tts-refine-parameter-panel" :class="{ locked: ttsEditor.task?.status === 'running' }">
                     <div class="tts-refine-parameter-head">
                       <div>
                         <span class="sidebar-label">{{ ttsRefineEngineLabel }}</span>
@@ -1608,6 +1625,14 @@
                     <option value="custom">自定义</option>
                   </select>
                 </label>
+                <label v-if="form.dynamic_video" class="visual-pacing-select">
+                  <span>动态镜头规划上限</span>
+                  <select v-model.number="form.dynamic_max_shot_duration">
+                    <option :value="15">常规 · 15 秒</option>
+                    <option :value="30">长镜头 · 30 秒</option>
+                  </select>
+                  <small class="muted">上限不是目标时长。30 秒需视频模型支持，成本与本地显存占用可能增加；手动编辑不受强制拆分。</small>
+                </label>
                 <div v-if="form.visual_pacing_preset === 'custom'" class="form-grid visual-pacing-custom">
                   <label>
                     <span>最低停留（秒）</span>
@@ -1644,7 +1669,7 @@
               </div>
             </div>
             </div></template>
-   <template v-else-if="studioDrawer==='字幕样式'"><SubtitleStyleEditor :settings="form" v-model:variant="form.video_render_variant" /></template>
+   <template v-else-if="studioDrawer==='字幕样式'"><SubtitleStyleEditor :settings="form" :dynamic="form.dynamic_video" v-model:variant="form.video_render_variant" /></template>
    <template v-else-if="studioDrawer==='导出字幕样式'"><SubtitleStyleEditor :settings="visualPresentation" v-model:variant="visualRenderMode" orientation-control :readonly="visualEditor.task?.status==='running'" /></template>
    <template v-else-if="studioDrawer==='背景音乐' && !(isGuidedWorkflowJob(studioJob) && guidedStage === 'render_setup')"><section class="bgm-panel visual-editor-bgm" :class="{ expanded: visualBgm.enabled }">
                 <div class="bgm-panel-head">
@@ -1780,18 +1805,19 @@
               </div>
             </section></template>
    <template v-else-if="studioDrawer==='我的预设'"><p class="muted">载入常用设置；项目里的临时修改不会自动覆盖预设。</p><select v-model="selectedParameterPreset"><option value="">选择预设</option><option v-for="preset in parameterPresets" :key="preset.name" :value="preset.name">{{preset.name}}</option></select><button :disabled="!selectedParameterPreset||loadingParameterPresets" @click="loadSelectedParameterPreset">套用预设</button><button :disabled="savingParameterPreset" @click="saveCurrentParameterPreset">保存当前配置为预设</button><button :disabled="!selectedParameterPreset||deletingParameterPreset" @click="deleteSelectedParameterPreset">删除所选预设</button><p class="muted">{{parameterPresetMessage}}</p></template>
-  </div><footer><span class="muted">{{studioDrawer==='参数回顾'?'只读查看，不会修改任务':studioPage==='new'?studioSaveState:'配置修改后按对应保存按钮生效'}}</span><button class="primary" :disabled="voiceAdoptionPending" @click="studioDrawer=''">{{voiceAdoptionPending?'正在采用音色…':'完成'}}</button></footer></aside></div>
+  </div><footer><span class="muted">{{studioDrawer==='参数回顾'?'只读查看，不会修改任务':studioPage==='new'?studioSaveState+' · '+(form._rerun_source_project?'重新运行后应用到项目':'开始制作时使用此配置'):'需要保存的修改，请使用对应保存按钮；关闭不会触发生成'}}</span><button class="primary" :disabled="voiceAdoptionPending" @click="studioDrawer=''">{{voiceAdoptionPending?'正在采用音色…':'关闭设置'}}</button></footer></aside></div>
   <div v-if="cloudLoginOpen" class="cloud-auth-overlay" @click.self="cloudLoginOpen = false">
         <section class="cloud-auth-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-auth-title">
           <div class="cloud-auth-dialog-head">
             <div>
               <span class="cluster-card-kicker">ONE-CLICK VIDGEN CLOUD</span>
-              <h2 id="cloud-auth-title">{{ cloudSession.authenticated ? '云端账户' : '登录云端服务' }}</h2>
+              <h2 id="cloud-auth-title">{{ cloudRecoveryOpen ? '忘记密码' : cloudSession.authenticated ? '云端账户' : '登录云端服务' }}</h2>
             </div>
             <button class="cloud-auth-close" type="button" aria-label="关闭登录窗口" @click="cloudLoginOpen = false">×</button>
           </div>
 
-          <div v-if="!cloudSession.configured" class="cluster-notice warning">
+          <CloudPasswordRecovery v-if="cloudRecoveryOpen" :initial-email="cloudLoginForm.email" @back="closeCloudRecovery" @reset="onCloudPasswordReset" />
+          <div v-else-if="!cloudSession.configured" class="cluster-notice warning">
             云端服务正在部署中，登录入口已经准备完毕。服务上线后会由程序自动连接，无需用户填写服务器地址。
           </div>
           <template v-else-if="cloudSession.authenticated">
@@ -1812,6 +1838,7 @@
           <form v-else class="cloud-auth-form" @submit.prevent="loginCloud">
             <label><span>邮箱</span><input v-model.trim="cloudLoginForm.email" type="email" autocomplete="email" placeholder="请输入注册邮箱" required /></label>
             <label><span>密码</span><input v-model="cloudLoginForm.password" type="password" autocomplete="current-password" placeholder="请输入密码" required /></label>
+            <button class="ghost-btn cloud-auth-recovery" type="button" @click="openCloudRecovery">忘记密码？通过邮箱找回</button>
             <button class="primary-btn cloud-auth-submit" type="submit" :disabled="cloudBusy">
               {{ cloudBusy ? '正在登录…' : '登录' }}
             </button>
@@ -1937,6 +1964,7 @@
           </div>
           <button class="ghost-btn compact-btn" type="button" @click="closeLocalTtsInstaller">关闭</button>
         </header>
+        <ModelInstallGuide kind="tts" />
         <div v-if="localTtsComponent.ready" class="local-tts-install-result success">
           <strong>本地语音模型已就绪</strong>
           <p>现在可以正常使用本地 GPU 配音，功能与完整整合包一致。</p>
@@ -2012,11 +2040,19 @@
  </div>
 </template>
 <script>
+import CloudPasswordRecovery from './components/CloudPasswordRecovery.vue'
+import CloudImageQuality from './components/CloudImageQuality.vue'
 import { useWorkspace } from './useWorkspace'
 import { useStudio } from './useStudio'
+import CodexBridgePanel from './components/CodexBridgePanel.vue'
+import ModelInstallGuide from './components/ModelInstallGuide.vue'
 import { useStyleLibrary } from './useStyleLibrary'
 import { useAppearance } from './useAppearance'
 import TaskConsole from './components/TaskConsole.vue'
+import OperationStatus from './components/OperationStatus.vue'
+import ApiSetupGuide from './components/ApiSetupGuide.vue'
+import LanguageModelPresets from './components/LanguageModelPresets.vue'
+import {ref} from 'vue'
 import ImageStudio from './components/ImageStudio.vue'
 import ComfyUIWorkbench from './components/ComfyUIWorkbench.vue'
 import ComfyUIVideoSelector from './components/ComfyUIVideoSelector.vue'
@@ -2042,12 +2078,20 @@ import OneClickStatus from './components/OneClickStatus.vue'
 import ProjectArchiveButton from './components/ProjectArchiveButton.vue'
 import ProjectRecycleBin from './components/ProjectRecycleBin.vue'
 import { dynamicTextModeLabel } from './dynamicTextMode'
-export default { components: { SpeechModeSelector, OneClickStatus, AfterAudioSettings, ProjectArchiveButton, ProjectRecycleBin, DynamicPacingSelector, VoiceDesignPanel, VisualStyleGallery, StorySourcePanel, StoryWorkspace, DynamicTextModeSelector, ReferenceMaterials, SceneAssets, TaskConsole, ParameterReview, ImageStudio, ComfyUIWorkbench, ComfyUIVideoSelector, VideoStudio, VideoModelSettings, ImageProfileSelector, SubtitleStyleEditor }, setup() { const workspace = useWorkspace(); return { ...workspace, ...useStudio(workspace), ...useStyleLibrary(workspace), ...useAppearance(), visualPresentation, dynamicTextModeLabel, draftStoryHandoff, videoProjectCover, matchingVisualStyle } } }
+import ResizableShotWorkspace from './components/ResizableShotWorkspace.vue'
+import WorkspacePanels from './components/WorkspacePanels.vue'
+export default { components: { CloudPasswordRecovery, CloudImageQuality, ModelInstallGuide, CodexBridgePanel, LanguageModelPresets, ApiSetupGuide, OperationStatus, ResizableShotWorkspace, WorkspacePanels, SpeechModeSelector, OneClickStatus, AfterAudioSettings, ProjectArchiveButton, ProjectRecycleBin, DynamicPacingSelector, VoiceDesignPanel, VisualStyleGallery, StorySourcePanel, StoryWorkspace, DynamicTextModeSelector, ReferenceMaterials, SceneAssets, TaskConsole, ParameterReview, ImageStudio, ComfyUIWorkbench, ComfyUIVideoSelector, VideoStudio, VideoModelSettings, ImageProfileSelector, SubtitleStyleEditor }, setup() { const workspace = useWorkspace(); return { serviceTab:ref('overview'),apiGuideOpen:ref(false), ...workspace, ...useStudio(workspace), ...useStyleLibrary(workspace), ...useAppearance(), visualPresentation, dynamicTextModeLabel, draftStoryHandoff, videoProjectCover, matchingVisualStyle } } }
 </script>
 <style scoped>
 .project-row-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 
 .project-cover{width:64px;height:44px;object-fit:cover;border-radius:7px;flex-shrink:0}
+.service-header-actions{display:flex;gap:10px;flex-wrap:wrap}.services-page .services-nav{border-bottom:1px solid var(--border,#35423f);gap:6px;padding-bottom:14px}.services-nav button{padding:10px 18px}.services-nav button.active{background:var(--accent,#81d9bd);color:#132720;border-color:var(--accent,#81d9bd)}.live-studio .services-page .api-key-card{display:flex;flex-direction:column;gap:18px}.services-page .api-key-card>*{width:100%;min-width:0}.services-page #service-language{max-width:760px}.services-page .api-key-card>.sidebar-label{font-size:16px;color:var(--text,#eef3f1)}.services-page :deep(.video-model-settings),.services-page :deep(.image-profile-selector){margin:0}
+.services-page{max-width:1280px;margin:0 auto;width:100%}.services-nav{display:flex;gap:10px;flex-wrap:wrap;padding:12px 0;margin-bottom:20px}.services-nav a{padding:9px 14px;border:1px solid var(--border,#35423f);border-radius:8px;color:var(--text,#eef3f1);text-decoration:none}.services-nav a:hover{border-color:var(--accent,#81d9bd);color:var(--accent,#81d9bd)}.services-page .studio-service-settings{width:100%;max-width:none;display:grid;gap:18px}.services-page .brand{display:none}.services-page .sidebar-card{margin:0;padding:22px;min-width:0}.services-page .api-key-card{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px;align-items:start}.services-page .api-key-card>.sidebar-label,.services-page .api-key-card>.muted,.services-page .api-key-message{grid-column:1/-1}.services-page [id^="service-"]{min-width:0;scroll-margin-top:90px}.services-page .api-key-entry{margin:0}.services-page input,.services-page select{max-width:100%}.services-page .sidebar-secondary-entry{display:none}@media(max-width:1050px){.services-page .api-key-card{grid-template-columns:minmax(0,1fr)}.services-page .sidebar-card{padding:16px}}
+.live-studio .creation-heading-compact{margin-bottom:16px;gap:16px;align-items:center}.live-studio .creation-heading-compact h1{font-size:20px;font-weight:600;line-height:1.4}.live-studio .creation-heading-compact .eyebrow{font-size:9px;letter-spacing:1.5px;margin:0 0 4px;opacity:.7}.live-studio .creation-heading-compact .muted{font-size:12px;margin:5px 0 0}.live-studio .creation-settings-top{margin:0 0 24px;gap:12px}.live-studio .creation-settings-top>button{padding:14px 16px;min-height:76px}.live-studio .creation-settings-top b{font-size:13px;line-height:1.5}.live-studio .creation-settings-top small{font-size:11px}.live-studio .creation-heading-compact>button{font-size:12px;padding:9px 12px}
+@media(max-width:680px){.live-studio .creation-heading-compact h1{font-size:18px}.live-studio .creation-heading-compact{align-items:flex-start;flex-wrap:wrap}.live-studio .creation-settings-top>button{min-height:62px;padding:10px 12px}}
+.studio-visual-layout .studio-shot-list{max-height:calc(100vh - 150px);overflow-y:auto;min-width:0}.studio-visual-layout .studio-shot-detail{min-width:0}.studio-visual-layout .visual-image-card{display:block}.studio-visual-layout :deep(.workspace-panels){width:100%;min-width:0}.studio-visual-layout :deep(.raw-console){margin-top:0;max-width:100%}
+@media(max-width:900px){.studio-visual-layout .studio-shot-list{display:flex;overflow-x:auto;gap:8px;max-height:190px}.studio-visual-layout .studio-shot-list .list-heading{display:none}.studio-visual-layout .studio-shot-list>button{flex:0 0 130px;margin:0}.studio-visual-layout .studio-shot-list img{height:60px}}
 .live-studio .drawer label.dynamic-scene-toggle{display:flex;align-items:center;gap:8px}.live-studio .drawer label.dynamic-scene-toggle input{width:16px;height:16px;min-height:0;margin:0}
 .live-studio .setting-summaries{grid-template-columns:repeat(4,minmax(0,1fr))}
 .live-studio .dynamic-create-footer .one-click-video-option{display:flex;align-items:flex-start;gap:11px;max-width:650px}.live-studio .dynamic-create-footer .one-click-video-option>input{flex:0 0 auto;margin-top:3px}.live-studio .one-click-video-option>span{display:grid;gap:4px}.live-studio .one-click-video-option b{font-size:14px}.live-studio .one-click-video-option small{margin:0;line-height:1.55}

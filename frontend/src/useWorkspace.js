@@ -5,6 +5,8 @@ import { normalizeDynamicTextMode } from './dynamicTextMode'
 import { dynamicPacingSummary } from './dynamicPacing.js'
 import { restoreStoryProvenance } from './storyProvenance.js'
 import { projectCastBindingError, projectCastBindingPayload, restoreProjectCastBindings } from './projectCastBindings.js'
+import { readCloudPoolPreference, saveCloudPoolPreference, workspaceParameters } from './cloudPoolPreference'
+import { imageChoice, imageSize } from './icanImageSizes'
 
 // Shared task state: each mounted workspace owns one polling lifecycle.
 export function useWorkspace() {
@@ -186,6 +188,30 @@ const ttsSegmentIsPlaying = ref(false)
 const ttsSegmentCurrentTime = ref(0)
 const ttsSegmentDuration = ref(0)
 let ttsSegmentAudio = null
+let suspendedTtsPlayers = []
+
+function releaseTtsPreviewPlayers() {
+  suspendedTtsPlayers = []
+  for (const player of document.querySelectorAll('audio')) {
+    const source = player.getAttribute('src')
+    player.pause()
+    if (source) {
+      suspendedTtsPlayers.push({ player, source })
+      player.removeAttribute('src')
+      player.load()
+    }
+  }
+}
+
+function restoreTtsPreviewPlayers() {
+  for (const { player, source } of suspendedTtsPlayers) {
+    if (player.isConnected && !player.getAttribute('src')) {
+      player.src = source
+      player.load()
+    }
+  }
+  suspendedTtsPlayers = []
+}
 const visualSelfReferenceMacroId = ref('')
 const visualReferenceUploads = ref([])
 const visualReferenceUploading = ref(false)
@@ -315,6 +341,8 @@ const cloudRechargeMessage = ref('')
 const cloudRechargeSuccess = ref(null)
 const cloudLoginForm = reactive({ email: '', password: '' })
 const cloudLoginOpen = ref(false)
+const cloudRecoveryOpen = ref(false)
+watch(cloudLoginOpen, (open) => { if (!open) cloudRecoveryOpen.value = false })
 let cloudVoicePreviewAudio = null
 let cloudRechargePollTimer = null
 let cloudRechargePollDeadline = 0
@@ -573,7 +601,9 @@ const form = reactive({
   qwen_tts_instructions: '',
   qwen_tts_voice: 'Elias',
   visual_backend: 'poster',
-  use_cloud_image_pool: false,
+  use_cloud_image_pool: readCloudPoolPreference(),
+  method: 'running',
+  size: '2560x1440',
   image_profile_id: '',
   image_resolution: '1k',
   video_render_variant: 'both',
@@ -597,8 +627,11 @@ const form = reactive({
   comfyui_steps: 8, comfyui_width: null, comfyui_height: null,
   comfyui_h3_prompt_agent: false,
   comfyui_reference_audio: false,
+  presenter_mode: false,
+  presenter_reference_id: '',
   visual_prompt_mode: 'simple',
   visual_pacing_preset: 'standard',
+  dynamic_max_shot_duration: 15,
   visual_min_duration: 6,
   visual_target_duration: 8,
   visual_max_duration: 12,
@@ -1622,7 +1655,25 @@ function handleTtsEngineChanged() {
   if (ttsEngine.value === 'indextts25' && !health.value.tts25_online) openLocalTtsInstaller()
 }
 
+function openCloudRecovery() {
+  cloudRecoveryOpen.value = true
+  cloudLoginOpen.value = true
+  cloudError.value = ''
+  cloudMessage.value = ''
+  cloudLoginForm.password = ''
+}
+function closeCloudRecovery(email) {
+  cloudRecoveryOpen.value = false
+  cloudLoginForm.email = email
+  cloudLoginForm.password = ''
+}
+async function onCloudPasswordReset(email) {
+  cloudLoginForm.email = email
+  cloudLoginForm.password = ''
+  await refreshCloudState()
+}
 async function openCloudLogin() {
+  cloudRecoveryOpen.value = false
   cloudLoginOpen.value = true
   await refreshCloudState()
 }
@@ -2422,7 +2473,7 @@ async function togglePlugin(plugin) {
     const payload = await api.togglePlugin(plugin.folder)
     plugin.enabled = Boolean(payload.enabled)
     pluginMessage.value = plugin.enabled
-      ? `${plugin.name} 已标记为启用；当前预览框架仍不会执行插件代码。`
+      ? `${plugin.name} ${payload.framework_only ? '已记录启用状态；尚无可执行功能' : '已启用'}。`
       : `${plugin.name} 已停用。`
   } catch (error) {
     pluginMessage.value = error.message || '无法修改插件状态'
@@ -2557,7 +2608,7 @@ async function loadSelectedParameterPreset() {
     const payload = await api.parameterPreset(selectedParameterPreset.value)
     const parameters = payload.parameters || {}
     const autoAnalyzeReferenceImages = form.auto_analyze_reference_images
-    Object.assign(form, parameters)
+    Object.assign(form, workspaceParameters(parameters))
     form.project_cast_bindings = restoreProjectCastBindings(parameters.project_cast_bindings,
       parameters.reference_image_ids?.length ? parameters.reference_image_ids : [parameters.protagonist_reference_image_id].filter(Boolean))
     if (parameters.dynamic_video || Object.hasOwn(parameters, 'dynamic_text_mode')) {
@@ -3165,7 +3216,7 @@ async function loadVisualEditor({ preservePage = false, hydrateBgm = false } = {
     if (hydrateBgm) hydrateVisualBgm(visualEditor.value.bgm)
     if (!preservePage) visualEditorPage.value = 1
     if (visualEditorPage.value > visualEditorPageCount.value) visualEditorPage.value = visualEditorPageCount.value
-    if (!visualEditor.value.items.some((item) => item.id === visualTimingSelectedId.value)) {
+    if (!String(visualTimingSelectedId.value||'').startsWith('scene_asset_') && !visualEditor.value.items.some((item) => item.id === visualTimingSelectedId.value)) {
       visualTimingSelectedId.value = visualEditor.value.items.find((item) => item.timing)?.id || ''
     }
     if (!visualEditor.value.timing_history?.some((item) => item.id === selectedVisualTimingHistory.value)) {
@@ -3655,6 +3706,7 @@ async function pollTtsEditorStatus() {
           await Promise.all([loadTtsEditor(), loadVisualEditor({ preservePage: true })])
         }
       }
+      restoreTtsPreviewPlayers()
     }
   } catch {
     // Main job log remains visible if one polling request fails.
@@ -3698,6 +3750,16 @@ async function regenerateSelectedTtsSegments() {
     ? `\n其中 ${subtitleSyncCount} 句会在重配成功后同步修改并保存字幕。`
     : ''
   if (!window.confirm(`重新生成选中的 ${count} 句配音？${pronunciationNotice}${subtitleSyncNotice}\n\n完成后整条音频、字幕时间戳和画面时间线会自动更新，现有视频需点击“重新渲染”才能应用。`)) return
+  // Release preview requests before the backend commits replacement audio.
+  resetTtsSegmentAudio()
+  if (ttsBoundaryPreviewAudio) {
+    ttsBoundaryPreviewAudio.onended = null
+    ttsBoundaryPreviewAudio.pause()
+    ttsBoundaryPreviewAudio.removeAttribute('src')
+    ttsBoundaryPreviewAudio.load()
+    ttsBoundaryPreviewAudio = null
+  }
+  releaseTtsPreviewPlayers()
   try {
     const refineSettings = {
       tts_speed: ttsRefineForm.tts_speed,
@@ -3726,6 +3788,7 @@ async function regenerateSelectedTtsSegments() {
     startTtsEditorPolling()
   } catch (error) {
     ttsEditor.value.task = { status: 'failed', message: error.message || '无法启动单句重配音' }
+    restoreTtsPreviewPlayers()
   }
 }
 
@@ -4553,6 +4616,7 @@ function removeReferenceImage(index) {
     if (!form.reference_image_labels[id]) form.reference_image_labels[id] = `图${position + 1}`
   }
   const removedId = form.reference_image_ids[index]
+  if(form.presenter_reference_id===removedId){form.presenter_reference_id='';form.presenter_mode=false}
   delete form.reference_image_notes[removedId]
   delete form.reference_image_labels[removedId]
   delete form.reference_image_kinds[removedId]
@@ -4608,16 +4672,21 @@ function guidedVisualParameters() {
     content_mode: form.content_mode,
     director_strategy: form.director_strategy,
     ...(form.dynamic_video ? { dynamic_text_mode: form.dynamic_text_mode } : {}),
+    presenter_mode: Boolean(form.dynamic_video&&form.presenter_mode),
+    presenter_reference_id: form.presenter_reference_id||'',
     ...(form.dynamic_video ? { video_generation_backend: form.video_generation_backend, comfyui_profile_id: form.comfyui_profile_id, comfyui_steps: form.comfyui_steps, comfyui_width: form.comfyui_width, comfyui_height: form.comfyui_height, comfyui_h3_prompt_agent: form.comfyui_h3_prompt_agent, comfyui_reference_audio: form.comfyui_h3_prompt_agent ? false : form.comfyui_reference_audio } : {}),
     scene_references_enabled: form.scene_references_enabled,
     auto_split_long_text: form.auto_split_long_text,
     split_text_threshold: form.split_text_threshold,
     visual_backend: form.visual_backend,
     use_cloud_image_pool: form.use_cloud_image_pool,
+    method: form.method,
+    size: form.size,
     image_profile_id: form.image_profile_id,
     image_resolution: form.image_resolution,
     visual_prompt_mode: form.visual_prompt_mode,
     visual_pacing_preset: form.visual_pacing_preset,
+    dynamic_max_shot_duration: form.dynamic_max_shot_duration,
     visual_min_duration: form.visual_min_duration,
     visual_target_duration: form.visual_target_duration,
     visual_max_duration: form.visual_max_duration,
@@ -4649,7 +4718,7 @@ function guidedRenderParameters() {
 
 function hydrateGuidedForm(job) {
   if (!job?.request) return
-  for (const [key, value] of Object.entries(job.request)) {
+  for (const [key, value] of Object.entries(workspaceParameters(job.request))) {
     if (!(key in form) || key.startsWith('_')) continue
     form[key] = Array.isArray(value) ? value.map((item) => (typeof item === 'object' ? { ...item } : item)) : value
   }
@@ -5456,7 +5525,18 @@ watch(() => form.auto_analyze_reference_images, (enabled) => {
   try { window.localStorage.setItem(REFERENCE_ANALYSIS_STORAGE_KEY, enabled ? '1' : '0') } catch { /* optional browser storage */ }
 })
 
+watch(() => form.use_cloud_image_pool, (enabled) => {
+  saveCloudPoolPreference(enabled)
+}, { flush: 'sync' })
+
+watch(() => form.video_orientation, (orientation) => {
+  if (form.use_cloud_image_pool && form.method === 'ican') {
+    form.size = imageSize(orientation === 'portrait' ? '9:16' : '16:9', imageChoice(form.size).quality)
+  }
+}, { flush: 'sync' })
+
 watch(() => form.image_profile_id, () => {
+  if (form.use_cloud_image_pool) return
   const resolutions = selectedImageProfile.value?.resolutions || ['1k', '2k', '4k']
   if (!resolutions.includes(form.image_resolution)) form.image_resolution = resolutions[0] || '1k'
 })
@@ -5515,5 +5595,5 @@ onUnmounted(() => {
   }
 })
 
-return { invalidateProjectRequests, computed, onMounted, onUnmounted, reactive, ref, watch, api, VISUAL_PROMPT_FULL_STORAGE_KEY, LOCKED_GENERAL_AGENT2_PROTOCOL, LEGACY_LOCKED_GENERAL_AGENT2_PROTOCOL, EDITABLE_GENERAL_AGENT2_PREFIX, AGENT2_DIRECTOR_THEME_STORAGE_KEY, AGENT2_DIRECTOR_THEME_DEFAULTS, VISUAL_PROMPT_STYLE_STORAGE_KEY, GLOBAL_CHARACTER_STORAGE_KEY, STORY_ENVIRONMENT_STORAGE_KEY, AGENT0_PROMPT_STORAGE_KEY, AGENT1_PROMPT_STORAGE_KEY, VISUAL_PROMPT_MODE_STORAGE_KEY, CONTENT_MODE_STORAGE_KEY, DIRECTOR_STRATEGY_STORAGE_KEY, VISUAL_PACING_STORAGE_KEY, VISUAL_PACING_DEFAULTS, FALLBACK_CONTENT_MODES, randomProjectName, sidebarOpen, activePage, plugins, pluginsLoading, pluginToggling, pluginNotice, pluginMessage, scriptUploadName, scriptUploadError, workspaceScriptTextarea, module1ScriptTextarea, structuralBlankSeconds, sourceAudioName, sourceAudioError, sourceAudioUploading, ttsVoiceUploadName, ttsVoiceUploadError, ttsVoiceUploading, ttsVoicePreviewUrl, ttsVoicePreviewPlaying, ttsVoicePreviewAudio, stepAudioPlayer, stepAudioPlaying, stepAudioCurrentTime, stepAudioDuration, savingStepAudio, stepAudioSaveMessage, retryingTts, guidedAdvancing, guidedCreatingNew, guidedCancelling, guidedStageMessage, guidedStageError, guidedSubtitles, guidedSubtitleDrafts, guidedSubtitleLoading, guidedSubtitleSaving, folderOpenMessage, visualEditorOpen, visualEditorLoading, visualEditor, visualEditorProjects, visualEditorProjectId, visualEditorPage, visualTimingSelectedId, selectedVisualTimingHistory, visualTimingAdjusting, selectedVisualSubtitleHistory, visualSubtitleEditingId, visualSubtitleDrafts, visualSubtitleOriginals, visualSubtitleSaving, visualSubtitleProjectKey, visualSubtitleRemoveDialog, visualBoundaryAlign, visualBoundaryApplying, visualBoundaryAudio, visualBoundaryAudioEnd, ttsEditor, ttsEditorLoading, selectedTtsSegmentIndices, ttsReadingDrafts, ttsPronunciationOpenIndices, ttsBoundary, ttsBoundaryBusy, ttsPauseDrafts, ttsBoundaryPreviewAudio, ttsBoundaryPreviewTimer, ttsRefineForm, ttsRefineVoiceName, ttsRefineVoiceUploading, ttsRefineVoiceError, ttsRefineEngineLabel, ttsRefinementActive, ttsSegmentPlayingIndex, ttsSegmentIsPlaying, ttsSegmentCurrentTime, ttsSegmentDuration, ttsSegmentAudio, visualSelfReferenceMacroId, visualReferenceUploads, visualReferenceUploading, visualReferenceOwnerMacroId, VISUAL_EDITOR_PAGE_SIZE, visualPreviewItem, visualRenderMode, visualBgmUploading, visualBgmError, visualBgm, submitting, preflightRunning, preflightOpen, preflightResult, submittingModule1, submittingSubtitle, cancellingGeneration, resumingGeneration, health, settings, session, authError, activeJob, followLiveJob, module1Job, subtitleJob, jobs, jobPage, jobTotal, jobTotalPages, JOB_PAGE_SIZE, editorAssets, editorJobs, editorJob, uploading, editing, startingTts, ttsStartMessage, showFullLogs, diagnosticExporting, diagnosticMessage, generationSubmitMessage, apiKeyStatus, apiKeyMessage, apiKeyEditing, apiKeyRuntimeErrors, savingApiKeys, deletingApiKey, savingQwenTtsKey, qwenTtsKeyMessage, ttsEngine, localTtsInstallerOpen, localTtsInstallBusy, localTtsInstallError, localTtsComponent, localTtsDownloadedGb, localTtsEstimatedGb, localTtsInstallProgress, openLocalTtsInstaller, closeLocalTtsInstaller, refreshLocalTtsComponent, startLocalTtsInstall, switchToClusterTts, handleTtsEngineChanged, cloudSession, cloudAccount, cloudVoices, cloudVoiceLimits, cloudQuote, cloudBusy, cloudQuoteLoading, cloudVoiceUploading, cloudVoiceDisplayName, cloudVoiceApiAvailable, cloudVoicePreviewLoading, cloudVoicePreviewPlayingId, cloudError, cloudMessage, cloudRechargeOpen, cloudRechargeProducts, cloudRechargeSelectedId, cloudRechargeOrder, cloudRechargePaymentUrl, cloudRechargeLoadingProducts, cloudRechargeBusy, cloudRechargeChecking, cloudRechargeError, cloudRechargeMessage, cloudRechargeSuccess, cloudLoginForm, cloudLoginOpen, cloudVoicePreviewAudio, cloudRechargePollTimer, cloudRechargePollDeadline, cloudRechargeCheckoutWindow, cloudRechargePreviousBodyOverflow, CLOUD_RECHARGE_STORAGE_KEY, qwenVoiceGroups, apiKeyStatusLoaded, timer, visualEditorTaskTimer, ttsEditorTaskTimer, completionAudioContext, completionFlashTimer, completionFlashState, completionFaviconLink, completionFaviconCreated, originalFaviconHref, originalDocumentTitle, lastCompletionAlertAt, MAX_SCRIPT_FILE_SIZE, MAX_SCRIPT_CHARACTERS, insertStructuralBlank, loginForm, registerForm, subtitleForm, subtitleAudioName, subtitleAudioError, subtitleAudioUploading, subtitleReferenceName, subtitleReferenceError, subtitleAddEnabled, subtitleFonts, subtitleFontsLoading, subtitleRenderMessage, subtitleBgmUploading, subtitleBgmError, subtitleRenderForm, subtitleStyleOptions, referenceImageNames, protagonistReferenceImageError, protagonistReferenceUploading, apiKeyForm, savingImageConcurrency, imageConcurrencyPreview, languageProviderOptions, visibleLanguageProviderOptions, currentLanguageProvider, currentLanguageProviderLabel, customLanguageProvider, currentLanguageModels, currentLanguageModelLabel, parameterPresets, selectedParameterPreset, loadingParameterPresets, savingParameterPreset, deletingParameterPreset, parameterPresetMessage, agentPromptPresets, selectedAgentPromptPreset, loadingAgentPromptPresets, savingAgentPromptPreset, bgmUploading, bgmError, bgmPreviewTrack, bgmPreviewAudio, form, contentModeOptions, visualMediumWarning, defaultAgentPromptPresets, userAgentPromptPresets, activeAgent2LockedProtocol, editableVisualPromptSystem, agent2DirectorThemeModel, agent2DirectorThemePlaceholder, visualEditorPageCount, visibleVisualEditorItems, selectedVisualTimingItem, visualSubtitleDirtyIds, visualSubtitleDirtyCount, visualReferenceSummary, contentModeDefaults, modeStorageKey, visualPacingDefaults, applyVisualPacing, visualPacingSummary, editorForm, steps, importantLogPattern, streamingFramePattern, compactStreamingFrameLogs, visibleJobLogs, logText, editorLogText, videoAssets, audioAssets, subtitleAssets, selectedVideoAsset, qwenSelectedVoice, qwenSelectedVoiceSupportsInstructions, ttsEngineLabel, ttsEngineProviderLabel, activeRemoteCloudVoices, cloudPresetVoiceOptions, cloudUploadedVoiceOptions, activeCloudVoices, firstDefaultCloudVoice, selectedCloudVoice, effectiveCloudVoice, previewableCloudPresetVoice, cloudVoicePreviewPlaying, cloudReady, cloudDisplayName, cloudAvailableCredits, cloudRechargeSelectedProduct, cloudRechargeStatusLabel, cloudRechargeStatusDescription, cloudVoiceModel, isGuidedWorkflowJob, guidedStage, guidedRunning, guidedCanStop, guidedCanResume, guidedHasExistingWorkflow, guidedStageSteps, guidedStageGroup, guidedStageOrder, guidedStageChipClass, guidedStageEyebrow, guidedStageTitle, guidedStageDescription, guidedWorkspaceClass, guidedSubtitleDirtyCount, guidedVisualEstimate, pendingGenerationJob, hasPendingGeneration, generationBlockReason, canSubmitGeneration, canSubmitModule1, scriptCharacterCount, scriptTooLong, module1JobRunning, module1ArtifactEntries, module1AudioPreviewUrl, module1LogText, subtitleJobRunning, canSubmitSubtitle, canRenderSubtitleVideo, subtitleLogText, submitButtonText, preflightPassedCount, scriptPlaceholder, canCancelGeneration, canResumeGeneration, canContinueStepMode, stepModeContinueLabel, stepModeAudioUrl, canRetryTts, ttsStatusText, COMPLETION_FAVICON_BLUE, COMPLETION_FAVICON_GREEN, prepareCompletionAlerts, playCompletionSound, stopCompletionFlash, startCompletionFlash, notifyVideoCompleted, handleActiveJobCompletion, apiFailureReason, apiJobKinds, syncApiRuntimeErrors, refresh, refreshEditor, login, register, logout, refreshCloudState, openCloudLogin, loginCloud, registerCloud, logoutCloud, formatCloudRechargeAmount, cloudRechargeProductLabel, stopCloudRechargePolling, clearStoredCloudRecharge, storePendingCloudRecharge, restorePendingCloudRecharge, loadCloudRechargeProducts, openCloudRecharge, closeCloudRecharge, continueCloudRecharge, finishCloudRecharge, openCloudPaymentPage, closeCloudRechargeCheckoutWindow, handleCloudRechargeReturnFocus, scheduleCloudRechargePoll, beginCloudRechargePolling, checkCloudRechargeOrder, startCloudRecharge, selectCloudVoice, stopCloudVoicePreview, toggleCloudVoicePreview, uploadCloudVoice, deleteSelectedCloudVoice, refreshCloudQuote, apiKeyFieldOpen, unlockProtectedInput, editApiKey, onLanguageProviderChanged, onLanguageSourceChanged, onLanguageModelChanged, addApiKeyAccount, deleteConfiguredApiKey, loadApiKeySettings, saveApiKeySettings, saveQwenTtsKey, startTts, loadSettings, openPluginsPage, loadPlugins, togglePlugin, openPluginsFolder, refreshParameterPresets, refreshAgentPromptPresets, loadSelectedAgentPromptPreset, saveCurrentAgentPromptPreset, saveCurrentParameterPreset, loadSelectedParameterPreset, deleteSelectedParameterPreset, formatBgmDuration, readAudioDuration, readAudioUrlDuration, hydrateBgmTrackDurations, bgmTrackUrl, isBgmPreviewing, stopBgmPreview, toggleBgmPreview, moveBgmTrack, clearBgmTracks, uploadVisualBgmTrack, removeVisualBgmTrack, uploadBgmTrack, removeBgmTrack, uploadLocalScript, handleSkipTtsChange, resetVisualPrompt, resetSimpleVisualPrompt, setContentMode, setDirectorStrategy, setVisualPromptMode, rememberVisualPrompt, rememberVisualPacing, uploadTtsVoice, restoreSavedTtsVoiceLabel, stopTtsVoicePreview, toggleTtsVoicePreview, restoreSavedProtagonistReferenceImageLabel, exportDiagnosticPackage, openArtifactFolder, openSubtitleOutputFolder, openProjectOutputFolder, openStepModeVisualPreviewFolder, hydrateVisualBgm, loadVisualEditor, visualSubtitleSentences, hydrateVisualSubtitleDrafts, loadTtsEditor, saveImageConcurrencySettings, hydrateTtsRefineSettings, uploadTtsRefineVoice, resetTtsSegmentAudio, prepareTtsSegmentAudio, toggleTtsSegmentAudio, seekTtsSegmentAudio, isTtsPronunciationOpen, toggleTtsPronunciationEditor, updateTtsReadingDraft, resetTtsReadingDraft, isTtsReadingModified, closeTtsBoundaryEditor, openTtsBoundaryEditor, updateTtsBoundaryParts, confirmTtsHistoryCapacity, refreshTtsBoundaryTokenCounts, ttsBoundaryOverLimit, submitTtsBoundary, saveTtsPause, undoLastTtsEdit, previewTtsBoundary, stopTtsEditorPolling, pollTtsEditorStatus, startTtsEditorPolling, regenerateSelectedTtsSegments, formatTimingRange, formatSubtitleTiming, isVisualSubtitleModified, visualSubtitlePaceWarning, toggleVisualSubtitleEdit, finishVisualSubtitleEdit, resetVisualSubtitleDraft, visualSubtitleHiddenModeLabel, canMergeHiddenSubtitle, openVisualSubtitleRemove, closeVisualSubtitleRemove, hideVisualSubtitle, restoreHiddenVisualSubtitle, saveVisualSubtitles, restoreSelectedVisualSubtitleHistory, hasNextVisualSubtitle, closeVisualBoundaryAlign, previewVisualSubtitleBoundary, formatBoundaryOffset, formatBoundaryDelta, playVisualBoundaryRange, applyVisualSubtitleBoundary, adjustEditedTiming, resetEditedTiming, commitEditedTiming, restoreSelectedVisualTimingHistory, removeEditedTimingPicture, stopVisualEditorTaskPolling, pollVisualEditorTaskStatus, startVisualEditorTaskPolling, selectVisualEditorProject, toggleVisualEditor, redrawVisualImage, beginVisualReferenceSelection, toggleVisualSelfReferenceImage, clearVisualReferenceImages, uploadVisualReferenceImages, uploadVisualImage, undoVisualImage, resetVisualImagePrompt, commitVisualBaseline, commitAllVisualBaselines, renderEditedVideo, cancelVisualRender, uploadSourceAudio, uploadReferenceImages, removeReferenceImage, generationRequestPayload, guidedVisualParameters, guidedRenderParameters, hydrateGuidedForm, loadGuidedAudioReview, loadGuidedSubtitles, saveGuidedSubtitles, formatGuidedTimestamp, openGuidedVisualEditor, advanceGuidedWorkflow, continueGuidedJob, clearGuidedEditingState, returnToFreshGuidedSetup, finishGuidedCancellation, cancelGuidedWorkflow, handleStepModeToggle, enterGuidedPostProduction, runManualPreflight, closePreflight, submit, selectJob, cancelGeneration, deleteGenerationJob, submitModule1, cancelModule1, uploadSubtitleAudio, loadSubtitleReference, loadSubtitleFonts, uploadSubtitleBgmTrack, removeSubtitleBgmTrack, renderSubtitleVideo, submitSubtitleJob, cancelSubtitleJob, syncStepAudioMetadata, syncStepAudioProgress, toggleStepAudioPlayback, seekStepAudio, saveStepAudioAs, formatStepAudioTime, retryTts, resumeGeneration, changeJobPage, uploadAsset, renderEdit, selectEditorJob, stepClass, statusLabel, statusClass, voiceLabel, emotionLabel, artifactLabel, kindLabel }
+return {imageChoice,imageSize,readCloudPoolPreference,saveCloudPoolPreference,workspaceParameters, invalidateProjectRequests, computed, onMounted, onUnmounted, reactive, ref, watch, api, VISUAL_PROMPT_FULL_STORAGE_KEY, LOCKED_GENERAL_AGENT2_PROTOCOL, LEGACY_LOCKED_GENERAL_AGENT2_PROTOCOL, EDITABLE_GENERAL_AGENT2_PREFIX, AGENT2_DIRECTOR_THEME_STORAGE_KEY, AGENT2_DIRECTOR_THEME_DEFAULTS, VISUAL_PROMPT_STYLE_STORAGE_KEY, GLOBAL_CHARACTER_STORAGE_KEY, STORY_ENVIRONMENT_STORAGE_KEY, AGENT0_PROMPT_STORAGE_KEY, AGENT1_PROMPT_STORAGE_KEY, VISUAL_PROMPT_MODE_STORAGE_KEY, CONTENT_MODE_STORAGE_KEY, DIRECTOR_STRATEGY_STORAGE_KEY, VISUAL_PACING_STORAGE_KEY, VISUAL_PACING_DEFAULTS, FALLBACK_CONTENT_MODES, randomProjectName, sidebarOpen, activePage, plugins, pluginsLoading, pluginToggling, pluginNotice, pluginMessage, scriptUploadName, scriptUploadError, workspaceScriptTextarea, module1ScriptTextarea, structuralBlankSeconds, sourceAudioName, sourceAudioError, sourceAudioUploading, ttsVoiceUploadName, ttsVoiceUploadError, ttsVoiceUploading, ttsVoicePreviewUrl, ttsVoicePreviewPlaying, ttsVoicePreviewAudio, stepAudioPlayer, stepAudioPlaying, stepAudioCurrentTime, stepAudioDuration, savingStepAudio, stepAudioSaveMessage, retryingTts, guidedAdvancing, guidedCreatingNew, guidedCancelling, guidedStageMessage, guidedStageError, guidedSubtitles, guidedSubtitleDrafts, guidedSubtitleLoading, guidedSubtitleSaving, folderOpenMessage, visualEditorOpen, visualEditorLoading, visualEditor, visualEditorProjects, visualEditorProjectId, visualEditorPage, visualTimingSelectedId, selectedVisualTimingHistory, visualTimingAdjusting, selectedVisualSubtitleHistory, visualSubtitleEditingId, visualSubtitleDrafts, visualSubtitleOriginals, visualSubtitleSaving, visualSubtitleProjectKey, visualSubtitleRemoveDialog, visualBoundaryAlign, visualBoundaryApplying, visualBoundaryAudio, visualBoundaryAudioEnd, ttsEditor, ttsEditorLoading, selectedTtsSegmentIndices, ttsReadingDrafts, ttsPronunciationOpenIndices, ttsBoundary, ttsBoundaryBusy, ttsPauseDrafts, ttsBoundaryPreviewAudio, ttsBoundaryPreviewTimer, ttsRefineForm, ttsRefineVoiceName, ttsRefineVoiceUploading, ttsRefineVoiceError, ttsRefineEngineLabel, ttsRefinementActive, ttsSegmentPlayingIndex, ttsSegmentIsPlaying, ttsSegmentCurrentTime, ttsSegmentDuration, ttsSegmentAudio, visualSelfReferenceMacroId, visualReferenceUploads, visualReferenceUploading, visualReferenceOwnerMacroId, VISUAL_EDITOR_PAGE_SIZE, visualPreviewItem, visualRenderMode, visualBgmUploading, visualBgmError, visualBgm, submitting, preflightRunning, preflightOpen, preflightResult, submittingModule1, submittingSubtitle, cancellingGeneration, resumingGeneration, health, settings, session, authError, activeJob, followLiveJob, module1Job, subtitleJob, jobs, jobPage, jobTotal, jobTotalPages, JOB_PAGE_SIZE, editorAssets, editorJobs, editorJob, uploading, editing, startingTts, ttsStartMessage, showFullLogs, diagnosticExporting, diagnosticMessage, generationSubmitMessage, apiKeyStatus, apiKeyMessage, apiKeyEditing, apiKeyRuntimeErrors, savingApiKeys, deletingApiKey, savingQwenTtsKey, qwenTtsKeyMessage, ttsEngine, localTtsInstallerOpen, localTtsInstallBusy, localTtsInstallError, localTtsComponent, localTtsDownloadedGb, localTtsEstimatedGb, localTtsInstallProgress, openLocalTtsInstaller, closeLocalTtsInstaller, refreshLocalTtsComponent, startLocalTtsInstall, switchToClusterTts, handleTtsEngineChanged, cloudSession, cloudAccount, cloudVoices, cloudVoiceLimits, cloudQuote, cloudBusy, cloudQuoteLoading, cloudVoiceUploading, cloudVoiceDisplayName, cloudVoiceApiAvailable, cloudVoicePreviewLoading, cloudVoicePreviewPlayingId, cloudError, cloudMessage, cloudRechargeOpen, cloudRechargeProducts, cloudRechargeSelectedId, cloudRechargeOrder, cloudRechargePaymentUrl, cloudRechargeLoadingProducts, cloudRechargeBusy, cloudRechargeChecking, cloudRechargeError, cloudRechargeMessage, cloudRechargeSuccess, cloudLoginForm, cloudLoginOpen, cloudVoicePreviewAudio, cloudRechargePollTimer, cloudRechargePollDeadline, cloudRechargeCheckoutWindow, cloudRechargePreviousBodyOverflow, CLOUD_RECHARGE_STORAGE_KEY, qwenVoiceGroups, apiKeyStatusLoaded, timer, visualEditorTaskTimer, ttsEditorTaskTimer, completionAudioContext, completionFlashTimer, completionFlashState, completionFaviconLink, completionFaviconCreated, originalFaviconHref, originalDocumentTitle, lastCompletionAlertAt, MAX_SCRIPT_FILE_SIZE, MAX_SCRIPT_CHARACTERS, insertStructuralBlank, loginForm, registerForm, subtitleForm, subtitleAudioName, subtitleAudioError, subtitleAudioUploading, subtitleReferenceName, subtitleReferenceError, subtitleAddEnabled, subtitleFonts, subtitleFontsLoading, subtitleRenderMessage, subtitleBgmUploading, subtitleBgmError, subtitleRenderForm, subtitleStyleOptions, referenceImageNames, protagonistReferenceImageError, protagonistReferenceUploading, apiKeyForm, savingImageConcurrency, imageConcurrencyPreview, languageProviderOptions, visibleLanguageProviderOptions, currentLanguageProvider, currentLanguageProviderLabel, customLanguageProvider, currentLanguageModels, currentLanguageModelLabel, parameterPresets, selectedParameterPreset, loadingParameterPresets, savingParameterPreset, deletingParameterPreset, parameterPresetMessage, agentPromptPresets, selectedAgentPromptPreset, loadingAgentPromptPresets, savingAgentPromptPreset, bgmUploading, bgmError, bgmPreviewTrack, bgmPreviewAudio, form, contentModeOptions, visualMediumWarning, defaultAgentPromptPresets, userAgentPromptPresets, activeAgent2LockedProtocol, editableVisualPromptSystem, agent2DirectorThemeModel, agent2DirectorThemePlaceholder, visualEditorPageCount, visibleVisualEditorItems, selectedVisualTimingItem, visualSubtitleDirtyIds, visualSubtitleDirtyCount, visualReferenceSummary, contentModeDefaults, modeStorageKey, visualPacingDefaults, applyVisualPacing, visualPacingSummary, editorForm, steps, importantLogPattern, streamingFramePattern, compactStreamingFrameLogs, visibleJobLogs, logText, editorLogText, videoAssets, audioAssets, subtitleAssets, selectedVideoAsset, qwenSelectedVoice, qwenSelectedVoiceSupportsInstructions, ttsEngineLabel, ttsEngineProviderLabel, activeRemoteCloudVoices, cloudPresetVoiceOptions, cloudUploadedVoiceOptions, activeCloudVoices, firstDefaultCloudVoice, selectedCloudVoice, effectiveCloudVoice, previewableCloudPresetVoice, cloudVoicePreviewPlaying, cloudReady, cloudDisplayName, cloudAvailableCredits, cloudRechargeSelectedProduct, cloudRechargeStatusLabel, cloudRechargeStatusDescription, cloudVoiceModel, isGuidedWorkflowJob, guidedStage, guidedRunning, guidedCanStop, guidedCanResume, guidedHasExistingWorkflow, guidedStageSteps, guidedStageGroup, guidedStageOrder, guidedStageChipClass, guidedStageEyebrow, guidedStageTitle, guidedStageDescription, guidedWorkspaceClass, guidedSubtitleDirtyCount, guidedVisualEstimate, pendingGenerationJob, hasPendingGeneration, generationBlockReason, canSubmitGeneration, canSubmitModule1, scriptCharacterCount, scriptTooLong, module1JobRunning, module1ArtifactEntries, module1AudioPreviewUrl, module1LogText, subtitleJobRunning, canSubmitSubtitle, canRenderSubtitleVideo, subtitleLogText, submitButtonText, preflightPassedCount, scriptPlaceholder, canCancelGeneration, canResumeGeneration, canContinueStepMode, stepModeContinueLabel, stepModeAudioUrl, canRetryTts, ttsStatusText, COMPLETION_FAVICON_BLUE, COMPLETION_FAVICON_GREEN, prepareCompletionAlerts, playCompletionSound, stopCompletionFlash, startCompletionFlash, notifyVideoCompleted, handleActiveJobCompletion, apiFailureReason, apiJobKinds, syncApiRuntimeErrors, refresh, refreshEditor, login, register, logout, refreshCloudState, openCloudLogin, loginCloud, registerCloud, logoutCloud, formatCloudRechargeAmount, cloudRechargeProductLabel, stopCloudRechargePolling, clearStoredCloudRecharge, storePendingCloudRecharge, restorePendingCloudRecharge, loadCloudRechargeProducts, openCloudRecharge, closeCloudRecharge, continueCloudRecharge, finishCloudRecharge, openCloudPaymentPage, closeCloudRechargeCheckoutWindow, handleCloudRechargeReturnFocus, scheduleCloudRechargePoll, beginCloudRechargePolling, checkCloudRechargeOrder, startCloudRecharge, selectCloudVoice, stopCloudVoicePreview, toggleCloudVoicePreview, uploadCloudVoice, deleteSelectedCloudVoice, refreshCloudQuote, apiKeyFieldOpen, unlockProtectedInput, editApiKey, onLanguageProviderChanged, onLanguageSourceChanged, onLanguageModelChanged, addApiKeyAccount, deleteConfiguredApiKey, loadApiKeySettings, saveApiKeySettings, saveQwenTtsKey, startTts, loadSettings, openPluginsPage, loadPlugins, togglePlugin, openPluginsFolder, refreshParameterPresets, refreshAgentPromptPresets, loadSelectedAgentPromptPreset, saveCurrentAgentPromptPreset, saveCurrentParameterPreset, loadSelectedParameterPreset, deleteSelectedParameterPreset, formatBgmDuration, readAudioDuration, readAudioUrlDuration, hydrateBgmTrackDurations, bgmTrackUrl, isBgmPreviewing, stopBgmPreview, toggleBgmPreview, moveBgmTrack, clearBgmTracks, uploadVisualBgmTrack, removeVisualBgmTrack, uploadBgmTrack, removeBgmTrack, uploadLocalScript, handleSkipTtsChange, resetVisualPrompt, resetSimpleVisualPrompt, setContentMode, setDirectorStrategy, setVisualPromptMode, rememberVisualPrompt, rememberVisualPacing, uploadTtsVoice, restoreSavedTtsVoiceLabel, stopTtsVoicePreview, toggleTtsVoicePreview, restoreSavedProtagonistReferenceImageLabel, exportDiagnosticPackage, openArtifactFolder, openSubtitleOutputFolder, openProjectOutputFolder, openStepModeVisualPreviewFolder, hydrateVisualBgm, loadVisualEditor, visualSubtitleSentences, hydrateVisualSubtitleDrafts, loadTtsEditor, saveImageConcurrencySettings, hydrateTtsRefineSettings, uploadTtsRefineVoice, resetTtsSegmentAudio, prepareTtsSegmentAudio, toggleTtsSegmentAudio, seekTtsSegmentAudio, isTtsPronunciationOpen, toggleTtsPronunciationEditor, updateTtsReadingDraft, resetTtsReadingDraft, isTtsReadingModified, closeTtsBoundaryEditor, openTtsBoundaryEditor, updateTtsBoundaryParts, confirmTtsHistoryCapacity, refreshTtsBoundaryTokenCounts, ttsBoundaryOverLimit, submitTtsBoundary, saveTtsPause, undoLastTtsEdit, previewTtsBoundary, stopTtsEditorPolling, pollTtsEditorStatus, startTtsEditorPolling, regenerateSelectedTtsSegments, formatTimingRange, formatSubtitleTiming, isVisualSubtitleModified, visualSubtitlePaceWarning, toggleVisualSubtitleEdit, finishVisualSubtitleEdit, resetVisualSubtitleDraft, visualSubtitleHiddenModeLabel, canMergeHiddenSubtitle, openVisualSubtitleRemove, closeVisualSubtitleRemove, hideVisualSubtitle, restoreHiddenVisualSubtitle, saveVisualSubtitles, restoreSelectedVisualSubtitleHistory, hasNextVisualSubtitle, closeVisualBoundaryAlign, previewVisualSubtitleBoundary, formatBoundaryOffset, formatBoundaryDelta, playVisualBoundaryRange, applyVisualSubtitleBoundary, adjustEditedTiming, resetEditedTiming, commitEditedTiming, restoreSelectedVisualTimingHistory, removeEditedTimingPicture, stopVisualEditorTaskPolling, pollVisualEditorTaskStatus, startVisualEditorTaskPolling, selectVisualEditorProject, toggleVisualEditor, redrawVisualImage, beginVisualReferenceSelection, toggleVisualSelfReferenceImage, clearVisualReferenceImages, uploadVisualReferenceImages, uploadVisualImage, undoVisualImage, resetVisualImagePrompt, commitVisualBaseline, commitAllVisualBaselines, renderEditedVideo, cancelVisualRender, uploadSourceAudio, uploadReferenceImages, removeReferenceImage, generationRequestPayload, guidedVisualParameters, guidedRenderParameters, hydrateGuidedForm, loadGuidedAudioReview, loadGuidedSubtitles, saveGuidedSubtitles, formatGuidedTimestamp, openGuidedVisualEditor, advanceGuidedWorkflow, continueGuidedJob, clearGuidedEditingState, returnToFreshGuidedSetup, finishGuidedCancellation, cancelGuidedWorkflow, handleStepModeToggle, enterGuidedPostProduction, runManualPreflight, closePreflight, submit, selectJob, cancelGeneration, deleteGenerationJob, submitModule1, cancelModule1, uploadSubtitleAudio, loadSubtitleReference, loadSubtitleFonts, uploadSubtitleBgmTrack, removeSubtitleBgmTrack, renderSubtitleVideo, submitSubtitleJob, cancelSubtitleJob, syncStepAudioMetadata, syncStepAudioProgress, toggleStepAudioPlayback, seekStepAudio, saveStepAudioAs, formatStepAudioTime, retryTts, resumeGeneration, changeJobPage, uploadAsset, renderEdit, selectEditorJob, stepClass, statusLabel, statusClass, voiceLabel, emotionLabel, artifactLabel, kindLabel }
 }

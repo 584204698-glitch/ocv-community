@@ -148,6 +148,7 @@ class VideoExportContracts(ExportFixture):
         other_record['id'] = other.name
         with patch.object(export, '_run', side_effect=fake_run), \
                 patch.object(export, '_has_audio_stream', return_value=True), \
+                patch.object(export, '_video_duration', return_value=3.3), \
                 patch.object(export, 'probe_media_duration', return_value=3.3):
             first = export._render(self.path, self.record)[0]
             second = export._render(other, other_record)[0]
@@ -265,6 +266,7 @@ class VideoExportContracts(ExportFixture):
         job=self._source_job_fixture(self.record['id'])
         job.status='completed'
         job.request.update(_step_mode_stage='completed',
+                           _dynamic_video_output_dir=Path(self.record['export']['directory']).name,
                            _step_output_dir=Path(self.record['export']['directory']).name)
         job.artifacts.update(video_raw=f'/api/video-studio/{self.record["id"]}/export/raw',
             video_with_subtitles=f'/api/video-studio/{self.record["id"]}/export/subtitles')
@@ -401,7 +403,17 @@ class VideoExportRender(ExportFixture):
         self._check_versions(raw, subtitled)
         self.assertGreater(self._rms(raw, .4), .005, 'source sound should start after the first-frame hold')
         self.assertLess(self._rms(raw, .9), .001, 'holding a short video must not loop its sound')
+        self.assertLess(self._rms(raw, 1.4), .001, 'holding the last frame between shots must not loop its sound')
         self.assertLess(self._rms(raw, 3.1), .001)
+
+    def test_explicit_narration_resync_slows_sound_only_within_shot(self):
+        self.record['export_settings'] = {'use_video_audio': True}
+        self.record['shots'][0]['audio_timing_adjustment'] = {'mode': 'trim_or_slow'}
+        _, raw, subtitled = export._render(self.path, self.record)
+        self._check_versions(raw, subtitled)
+        self.assertLess(self._rms(raw, .21), .001, 'source sound must not fill the leading hold')
+        self.assertGreater(self._rms(raw, .9), .005, 'source sound follows explicitly retimed video')
+        self.assertLess(self._rms(raw, 1.4), .001, 'retiming must not fill the gap after the shot')
 
     def test_muting_source_audio_does_not_truncate_at_short_narration(self):
         self.record['export_settings'] = {'use_video_audio': False}
@@ -439,8 +451,8 @@ class VideoExportRender(ExportFixture):
         _, raw, _ = export._render(self.path, self.record)
         # At this instant the short source clip has ended, but narration is
         # still present. Keeping its padded effects track must not duck speech.
-        original = self._rms(self.path / self.record['audio'], .9)
-        mixed = self._rms(raw, .9)
+        original = self._rms(self.path / self.record['audio'], 1.4)
+        mixed = self._rms(raw, 1.4)
         self.assertGreater(mixed / original, .95)
         self.assertLess(mixed / original, 1.15)
 

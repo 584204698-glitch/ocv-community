@@ -40,6 +40,9 @@ REQUIRED_MODEL_FILES = (
     "hf_cache/bigvgan/bigvgan_generator.pt",
     "hf_cache/w2v-bert-2.0/model.safetensors",
     "hf_cache/w2v-bert-2.0/conformer_shaw.pt",
+    "qwen0.6bemo4-merge/config.json",
+    "qwen0.6bemo4-merge/model.safetensors",
+    "qwen0.6bemo4-merge/tokenizer.json",
 )
 REQUIRED_MODEL_DIRS = (
     # The runner explicitly disables use_qwen_emo. Reference cloning and the
@@ -124,7 +127,7 @@ class IndexTTS25Config:
     def missing_model_resources(self) -> list[str]:
         missing: list[str] = []
         for relative in REQUIRED_MODEL_FILES:
-            if not (self.model_dir / relative).is_file():
+            if not (self.model_dir / relative).is_file() or (self.model_dir / relative).stat().st_size == 0:
                 missing.append(f"2.5 模型文件 {relative}")
         for relative in REQUIRED_MODEL_DIRS:
             if not (self.model_dir / relative).is_dir():
@@ -194,10 +197,29 @@ class IndexTTS25Config:
 
 def load_indextts25_config() -> IndexTTS25Config:
     load_project_env()
-    root = _project_path(os.getenv("INDEXTTS25_ROOT", ""), PROJECT_ROOT / "tools" / "IndexTTS25")
-    model_dir = _project_path(os.getenv("INDEXTTS25_MODEL_DIR", ""), root / "checkpoints")
+    standard_root = PROJECT_ROOT / "tts" / "IndexTTS25"
+    legacy_root = PROJECT_ROOT / "tools" / "IndexTTS25"
+    default_root = standard_root if standard_root.is_dir() or not legacy_root.is_dir() else legacy_root
+    root = _project_path(os.getenv("INDEXTTS25_ROOT", ""), default_root)
+    if root == legacy_root.resolve() and not legacy_root.is_dir() and standard_root.is_dir():
+        root = standard_root.resolve()
+    # Explicit configuration wins; older portable packages keep working until moved.
+    standard = PROJECT_ROOT / "models" / "tts" / "indextts25"
+    legacy = root / "checkpoints"
+    default_models = standard if (standard / "config.yaml").is_file() or not (legacy / "config.yaml").is_file() else legacy
+    model_dir = _project_path(os.getenv("INDEXTTS25_MODEL_DIR", ""), default_models)
+    # Previous portable .env templates explicitly wrote the old default. Once
+    # its models are moved, follow the new location instead of trapping users.
+    if model_dir in {legacy.resolve(), (legacy_root / "checkpoints").resolve()} and not (model_dir / "config.yaml").is_file() and (standard / "config.yaml").is_file():
+        model_dir = standard.resolve()
     examples_dir = _project_path(os.getenv("INDEXTTS25_EXAMPLES_DIR", ""), root / "examples")
     packages_dir = _project_path(os.getenv("INDEXTTS25_PACKAGES_DIR", ""), root / "python_packages")
+    for name, old, new in (("examples", legacy_root / "examples", root / "examples"),
+                           ("packages", legacy_root / "python_packages", root / "python_packages")):
+        if name == "examples" and examples_dir == old.resolve() and not old.is_dir():
+            examples_dir = new.resolve()
+        if name == "packages" and packages_dir == old.resolve() and not old.is_dir():
+            packages_dir = new.resolve()
     default_voice = os.getenv("INDEXTTS25_DEFAULT_VOICE", "voice_05.wav").strip()
     if default_voice not in VOICE_IDS:
         default_voice = "voice_05.wav"
@@ -211,7 +233,7 @@ def load_indextts25_config() -> IndexTTS25Config:
     return IndexTTS25Config(
         root=root,
         model_dir=model_dir,
-        python=_python_path(os.getenv("INDEXTTS25_PYTHON", "")),
+        python=_python_path(os.getenv("INDEXTTS25_PYTHON", "") or str((PROJECT_ROOT / "tts" / "python" / "python.exe") if standard_root.is_dir() or (PROJECT_ROOT / "tts" / "python" / "python.exe").is_file() else PROJECT_ROOT / "runtime" / "python" / "python.exe")),
         examples_dir=examples_dir,
         packages_dir=packages_dir,
         runtime_dir=PROJECT_ROOT / "runtime" / "data" / "indextts25",

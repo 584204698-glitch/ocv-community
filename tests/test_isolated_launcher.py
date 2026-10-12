@@ -14,12 +14,15 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("ocv_isolated_launcher", ROOT / "scripts" / "run_isolated.py")
-launcher = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = launcher
-SPEC.loader.exec_module(launcher)
+LAUNCHER_AVAILABLE = (ROOT / "scripts" / "run_isolated.py").is_file()
+if LAUNCHER_AVAILABLE:
+    SPEC = importlib.util.spec_from_file_location("ocv_isolated_launcher", ROOT / "scripts" / "run_isolated.py")
+    launcher = importlib.util.module_from_spec(SPEC)
+    sys.modules[SPEC.name] = launcher
+    SPEC.loader.exec_module(launcher)
 
 
+@unittest.skipUnless(LAUNCHER_AVAILABLE, "Optional private isolated launcher is not distributed with the public application")
 class IsolatedLauncherTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -317,6 +320,7 @@ print(json.dumps({'module': native.__file__, 'cwd': os.getcwd(), 'cookie': os.en
         self.assertEqual(report["identity"]["instance_id"], instance.identity)
 
 
+@unittest.skipUnless(LAUNCHER_AVAILABLE, "Optional private isolated launcher is not distributed with the public application")
 class IsolatedCookieTests(unittest.TestCase):
     def cookie(self, value=None):
         program = r'''

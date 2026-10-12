@@ -19,6 +19,8 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 
 from backend.app import story_workspace, video_studio as studio, video_generation as generation
 from backend.app.video_cast_planning import CreationCastBinding, creation_cast_bindings, saved_planning_cast
+from backend.app.video_render_options import VideoRenderOptions
+from backend.app.cloud_image_channel import ImageSize
 from tests import test_video_character_coverage as fixtures
 
 
@@ -29,6 +31,8 @@ def request_model():
     nodes = [node for node in tree.body if isinstance(node, ast.ClassDef)
              and node.name in {'BgmTrackRequest', 'GenerateRequest'}]
     namespace = {'__name__': __name__, 'BaseModel': BaseModel, 'Field': Field,
+        'VideoRenderOptions': VideoRenderOptions,
+        'ImageSize': ImageSize,
         'field_validator': field_validator, 'model_validator': model_validator,
         'Any': Any, 'Literal': Literal, 'StorySource': story_workspace.StorySource,
         'DEFAULT_QWEN_VOICE': 'Cherry', 'CreationCastBinding': CreationCastBinding,
@@ -87,7 +91,7 @@ class CastCreationImportTest(unittest.TestCase):
         self.pipeline.validate_step_audio_snapshot = Mock()
         self.pipeline.user_reference_image_path = Mock(side_effect=lambda owner, identity: self.uploads / (identity + '.png'))
         self.tts = ModuleType('backend.app.tts_editor')
-        self.tts.tts_editor = SimpleNamespace(status=Mock(return_value={'status': 'idle'}), commit_step_review=Mock())
+        self.tts.tts_editor = SimpleNamespace(status=Mock(return_value={'status': 'idle'}), commit_step_review=Mock(), _project_dir=Mock(return_value=self.source))
         self.stack.enter_context(patch.dict(sys.modules, {'backend.app.pipeline': self.pipeline,
                                                         'backend.app.tts_editor': self.tts}))
         self.job = SimpleNamespace(id='fixture-audio-job', user_id=1, request={

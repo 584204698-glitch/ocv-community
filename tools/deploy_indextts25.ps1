@@ -1,14 +1,19 @@
 param(
     [string]$ProjectRoot = "",
-    [switch]$SkipModelDownload
+    [switch]$SkipModelDownload,
+    [string]$ModelDirectory = ""
 )
 
 $ErrorActionPreference = "Stop"
 if (-not $ProjectRoot) {
     $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
-$engineRoot = Join-Path $ProjectRoot "tools\IndexTTS25"
-$python = Join-Path $ProjectRoot "runtime\python\python.exe"
+$engineRoot = Join-Path $ProjectRoot "tts\IndexTTS25"
+$python = Join-Path $ProjectRoot "tts\python\python.exe"
+if (!(Test-Path -LiteralPath $engineRoot) -and (Test-Path -LiteralPath (Join-Path $ProjectRoot "tools\IndexTTS25"))) {
+    $engineRoot = Join-Path $ProjectRoot "tools\IndexTTS25"
+    $python = Join-Path $ProjectRoot "runtime\python\python.exe"
+}
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "OCV portable Python was not found: $python"
 }
@@ -42,7 +47,7 @@ if ($missingPackages.Count -gt 0) {
 }
 
 if (-not $SkipModelDownload) {
-    $modelDir = Join-Path $engineRoot "checkpoints"
+    $modelDir = if ($ModelDirectory) { $ModelDirectory } else { Join-Path $ProjectRoot "models\tts\indextts25" }
     New-Item -ItemType Directory -Force $modelDir | Out-Null
     Write-Host "Downloading the optional IndexTTS-2.5 model (resume is supported)..."
     $downloadCode = @"

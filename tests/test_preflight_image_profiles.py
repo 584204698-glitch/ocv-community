@@ -145,7 +145,7 @@ class ImageProfilePreflightTest(unittest.TestCase):
         self.assertEqual(image["label"], "云端号池")
         self.assertEqual(image["status"], "passed")
         client.model_pool_status.assert_called_once_with()
-        client.image_pool_status.assert_called_once_with()
+        client.image_pool_status.assert_called_once_with('running')
         main._probe_language_api.assert_not_called()
         legacy_probe.assert_not_called()
         snapshot.assert_not_called()

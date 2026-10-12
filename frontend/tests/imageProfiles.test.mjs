@@ -10,6 +10,7 @@ import { mountComposable } from './support/composableHarness.mjs'
 // The browser mock separately verifies the rendered controls and interactions.
 const source = await readFile(new URL('../src/components/ImageProfileSelector.vue', import.meta.url), 'utf8')
 const script = compileScript(parse(source).descriptor, { id: 'image-profile-test' }).content
+  .replace("import CloudImageQuality from './CloudImageQuality.vue'", 'const CloudImageQuality = {}')
   .replaceAll("from 'vue'", `from '${import.meta.resolve('vue')}'`)
   .replaceAll("from '../api'", `from '${new URL('../src/api.js', import.meta.url).href}'`)
 const { default: component } = await import('data:text/javascript;base64,' + Buffer.from(script).toString('base64'))

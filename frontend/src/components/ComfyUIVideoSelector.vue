@@ -2,6 +2,7 @@
 import {computed,onMounted,ref,watch} from 'vue'
 import {requestJSON} from '../api'
 import {snapshotVideoDefaults} from '../videoCreationDefaults'
+import ModelInstallGuide from './ModelInstallGuide.vue'
 
 const props=defineProps({form:{type:Object,required:true}})
 const emit=defineEmits(['open-workbench'])
@@ -28,12 +29,24 @@ async function saveDefault(){
  catch(e){error.value=e.message}
  finally{savingDefault.value=false}
 }
+const route=computed(()=>props.form.video_generation_backend!=='comfyui'?'api':selected.value?.engine==='managed'||props.form.comfyui_profile_id?.startsWith('ocv-h3-')?'managed':'external')
+const routeProfiles=computed(()=>videoProfiles.value.filter(item=>(item.engine==='managed')===(route.value==='managed')))
+function chooseRoute(value){
+ if(value==='api'){chooseBackend('api');return}
+ const items=videoProfiles.value.filter(item=>(item.engine==='managed')===(value==='managed'))
+ if(!items.length){error.value=value==='managed'?'尚未读取到内置工作流，请刷新或到工作台检查内置引擎。':'请先到工作台添加外部视频工作流。';return}
+ props.form.video_generation_backend='comfyui'
+ props.form.comfyui_profile_id=items.find(item=>item.id===props.form.comfyui_profile_id)?.id||items[0].id
+ error.value=''
+ if(value==='managed'){props.form.comfyui_h3_prompt_agent=true;props.form.comfyui_reference_audio=false}
+}
 // Keep the user's reference-audio intent while changing profiles. An
 // incompatible saved profile is shown as invalid until a compatible profile
 // is selected; silently clearing the switch made a later valid selection lose
 // the setting before it could be saved.
 watch(()=>props.form.video_generation_backend,value=>{if(value!=='comfyui')props.form.comfyui_reference_audio=false})
 watch(()=>props.form.comfyui_h3_prompt_agent,enabled=>{if(enabled)props.form.comfyui_reference_audio=false})
+watch(()=>props.form.comfyui_profile_id,id=>{if(id?.startsWith('ocv-h3-')){props.form.comfyui_h3_prompt_agent=true;props.form.comfyui_reference_audio=false}})
 function toggleReferenceAudio(event){
  props.form._video_service_edited=true
  const enabled=Boolean(event.target.checked)
@@ -51,7 +64,10 @@ onMounted(load)
 <template>
  <section class="comfy-video-selector">
   <div class="selector-copy"><div class="sidebar-label">动态镜头生成</div><strong>选择视频由哪里生成</strong><small>此选择会保存进当前项目；以后修改全局配置不会悄悄切换已创建项目。</small></div>
-  <div class="backend-options" role="group" aria-label="动态镜头生成方式"><button type="button" :class="{active:form.video_generation_backend!=='comfyui'}" @click="chooseBackend('api')"><b>视频 API</b><small>使用“接口与服务”中的视频模型</small></button><button type="button" :class="{active:form.video_generation_backend==='comfyui'}" @click="chooseBackend('comfyui')"><b>本地 ComfyUI</b><small>调用已保存的跑视频工作流</small></button></div>
+  <div class="backend-options" role="group" aria-label="动态镜头生成方式"><button type="button" :class="{active:route==='managed'}" :disabled="loading" @click="chooseRoute('managed')"><b>OCV 内置 ComfyUI</b><small>生成时自动启动，无需另开软件</small></button><button type="button" :class="{active:route==='external'}" :disabled="loading" @click="chooseRoute('external')"><b>外部 ComfyUI</b><small>使用自配服务地址，需自行启动</small></button><button type="button" :class="{active:route==='api'}" @click="chooseRoute('api')"><b>视频 API</b><small>使用“接口与服务”中的视频模型</small></button></div>
+  <ModelInstallGuide v-if="route==='managed'" :profile-id="form.comfyui_profile_id" />
+  <small v-if="form.presenter_mode" class="selected-note">讲解员模式：仅讲解镜头自动注入配音，与下方全局音频开关独立。{{route==='api'?'请选择 ComfyUI 才能使用音频对口型。':supportsReferenceAudio?'当前工作流支持参考音频。':'当前工作流不支持参考音频，请选择带音频节点的工作流。'}}</small>
+  <div v-if="form.video_generation_backend==='comfyui'" class="local-profile-row"><label><span>{{route==='managed'?'内置工作流':'外部工作流'}}</span><select v-model="form.comfyui_profile_id" :disabled="loading||!routeProfiles.length"><option value="">{{loading?'正在读取…':'请选择工作流预设'}}</option><option v-if="form.comfyui_profile_id&&!selected" :value="form.comfyui_profile_id" disabled>原工作流不可用，请重新选择</option><option v-for="item in routeProfiles" :key="item.id" :value="item.id">{{item.name}}</option></select></label><button type="button" @click="load">刷新</button><button type="button" @click="emit('open-workbench')">引擎与工作流 →</button></div>
   <div v-if="form.video_generation_backend==='comfyui'" class="local-profile-row"><label><span>跑视频工作流</span><select v-model="form.comfyui_profile_id" :disabled="loading||!videoProfiles.length" @change="form._video_service_edited=true"><option value="">{{loading?'正在读取…':'请选择工作流预设'}}</option><option v-if="form.comfyui_profile_id&&!selected" :value="form.comfyui_profile_id">原工作流不可用，请重新选择</option><option v-for="item in videoProfiles" :key="item.id" :value="item.id">{{profileLabel(item)}}</option></select></label><button type="button" @click="load">刷新</button><button type="button" @click="emit('open-workbench')">管理工作流 →</button></div>
   <div v-if="form.video_generation_backend==='comfyui'" class="local-profile-row">
    <label><span>采样步数（新项目默认 8）</span><input type="number" min="1" max="100" :value="form.comfyui_steps" placeholder="沿用工作流" @input="setDimension('comfyui_steps',$event)"></label>
@@ -76,5 +92,6 @@ onMounted(load)
 </template>
 
 <style scoped>
+.backend-options{grid-template-columns:1fr!important}.backend-options button{grid-template-columns:1fr;min-width:0}.local-profile-row{grid-template-columns:minmax(0,1fr) auto!important}.local-profile-row label{grid-column:1/-1}.local-profile-row select{min-width:0}
 .comfy-video-selector{display:grid;gap:13px;padding:15px;border:1px solid var(--border,#34403e);border-radius:10px;background:color-mix(in srgb,var(--panel,#1c2221) 84%,#000)}.selector-copy{display:grid;gap:4px}.selector-copy small,.selected-note{color:var(--muted,#9aaba5);line-height:1.6}.backend-options{display:grid;grid-template-columns:1fr 1fr;gap:9px}.backend-options button{display:grid;gap:5px;text-align:left;padding:12px;background:transparent}.backend-options button.active{border-color:var(--accent,#83dec5);background:#25352f}.backend-options small{color:var(--muted,#9aaba5);white-space:normal}.local-profile-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:end}.local-profile-row label{display:grid;gap:6px;font-size:12px}.local-profile-row select{width:100%}.h3-agent-option{display:flex;gap:10px;align-items:flex-start;padding:12px;border:1px solid color-mix(in srgb,var(--accent,#83dec5) 28%,var(--border,#34403e));border-radius:9px;background:#202b28;cursor:pointer}.h3-agent-option input{margin-top:3px}.h3-agent-option span{display:grid;gap:4px}.h3-agent-option small{color:var(--muted,#9aaba5);line-height:1.55}.h3-agent-option.disabled{opacity:.7;cursor:not-allowed}.h3-agent-option .selector-warning-inline{color:#e7bf87}.selector-warning{padding:10px 12px;border-radius:8px;background:#3b3025;color:#e7bf87;font-size:12px}.selector-error{color:#e6a08d}@media(max-width:680px){.backend-options{grid-template-columns:1fr}.local-profile-row{grid-template-columns:1fr}.local-profile-row button{width:100%}}
 </style>

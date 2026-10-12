@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from .video_director_contracts import TEXT_CONTRACT
+from .video_medical_director import MEDICAL_PAPER, medical_contract
 
 
 TEXT_ASSISTED = 'text_assisted'
@@ -17,7 +18,7 @@ VISUAL_FIRST = 'visual_first'
 
 def normalize_text_mode(value: Any) -> str:
     """Read legacy/optional settings without silently switching their behavior."""
-    return value if isinstance(value, str) and value in (TEXT_ASSISTED, VISUAL_FIRST) else TEXT_ASSISTED
+    return value if isinstance(value, str) and value in (TEXT_ASSISTED, VISUAL_FIRST, MEDICAL_PAPER) else TEXT_ASSISTED
 
 
 def dynamic_text_mode(context: dict[str, Any]) -> str:
@@ -32,6 +33,13 @@ VISUAL_FIRST_CONTRACT = """【动态视频表达模式：画面优先·少字表
 若一个简短反应词、关键评价或必要标注比纯图案更直接准确，可以主动选用，不需要等用户逐字授权；
 但短句并不自动必要，保留的字应承担画面难以替代的信息，而不是重复观众已经看懂的动作。
 不把完整口播、长篇对白或整段旁白解释排进对话气泡、想象气泡、说明框或标题中；
+配音已经承担完整句子的解释；画面只补充可见信息。转述、比较、反问和评价优先用对应主体的
+动作、表情、具体物体或图案关系表达，不将引语原句写进气泡。图案须具体可绘制，不能仅写
+“抽象内容/报道剪影/思考图案”让下游猜测；例如媒体转述可用无字报纸版式、麦克风与报道对象
+的示意图，质疑可用人物对照观察和问号图形，不必再叠加完整提问。
+反应词通常2～4字即可；更长时先检查能否改为图案。不要机械截短原句造成歧义，也不要把
+长中文改成英文、拼音或多个短气泡。图案内的报纸、屏幕等只用无字线条和图形，除非原文
+或用户确实需要可读标签；菜单、店招等必要场景文字仍按下文规则保留。
 不要把同一段口播拆成多个短字气泡绕过这个要求，也不把带字气泡当默认表达工具。
 按当前语义选择尽量少、尽量简短且准确的文字，不按固定字数、固定气泡数或关键词模板机械裁切。
 若想象确实有助于表达，可以用少量有归属的图案气泡，内部写清实际要画的景观、场景或物体，
@@ -55,6 +63,8 @@ texts 与 reference_texts 只登记经过上述选择、实际需要显示的文
 
 def text_mode_contract(context: dict[str, Any]) -> str:
     """Return the original contract verbatim unless visual-first is selected."""
+    if dynamic_text_mode(context) == MEDICAL_PAPER:
+        return medical_contract(context, 'text')
     return VISUAL_FIRST_CONTRACT if dynamic_text_mode(context) == VISUAL_FIRST else TEXT_CONTRACT
 
 
@@ -113,9 +123,12 @@ def visual_first_plan_issues(plan: Any, *, inspect_reference: bool = True) -> li
 
 
 _VISIBLE_TEXT_INSTRUCTION = re.compile(
-    r'(?P<context>.{0,28}(?:对话气泡|想象气泡|文字气泡|标签气泡|说明框|标题|字幕条|画面文字|'
-    r'speech bubble|thought bubble|text bubble|callout|caption|subtitle|title|label)'
-    r'.{0,18}(?:显示|写着|写有|出现|浮现|变为|内容为|shows?|displays?|reads?|contains?)?\s*)'
+    # Never cross another quoted string while searching for the displayed
+    # text. Otherwise a closing quote can become the opening delimiter and
+    # turn layout prose between two labels into invented visible text.
+    r'(?P<context>[^“”「」『』"\n]{0,28}(?:对话气泡|想象气泡|文字气泡|标签气泡|标注|标签|说明框|标题|字幕条|画面文字|'
+    r'speech bubble|thought bubble|text bubble|callout|caption|subtitle|title|label|footer|heading)'
+    r'[^“”「」『』"\n]{0,18}(?:显示|写着|写有|出现|浮现|变为|内容为|shows?|displays?|reads?|contains?)?\s*)'
     r'[“「『\"](?P<text>[^”」』\"\n]{1,120})[”」』\"]'
 , re.I)
 _NEGATIVE_VISIBLE_TEXT = re.compile(
@@ -131,4 +144,30 @@ def visual_first_prompt_issues(prompt: str, plan: Any) -> list[str]:
         if text in allowed or _NEGATIVE_VISIBLE_TEXT.search(match.group('context')):
             continue
         issues.append(f'擅自新增未入选的画中文字“{text}”；应改用动作、表情或具体图案')
+    return list(dict.fromkeys(issues))
+
+
+def remove_unapproved_visible_text(prompt: str, plan: Any) -> str:
+    """On finalizer retry, turn invented displayed words into a non-text visual."""
+    allowed = set(approved_visible_texts(plan))
+
+    def replace(match: re.Match[str]) -> str:
+        text = match.group('text').strip()
+        if text in allowed or _NEGATIVE_VISIBLE_TEXT.search(match.group('context')):
+            return match.group(0)
+        return match.group('context') + '无字图案'
+
+    return _VISIBLE_TEXT_INSTRUCTION.sub(replace, str(prompt or ''))
+
+
+def visual_first_long_text_issues(prompt: str) -> list[str]:
+    """Check explicit visible prose even before a motion plan exists."""
+    issues = []
+    for match in _VISIBLE_TEXT_INSTRUCTION.finditer(str(prompt or '')):
+        if _NEGATIVE_VISIBLE_TEXT.search(match.group('context')):
+            continue
+        text = match.group('text').strip()
+        compact = re.sub(r'\s+', '', text)
+        if len(compact) > 10 or (len(compact) > 5 and re.search(r'[，。！？；：,.!?;:]', compact)):
+            issues.append(f'画中长句“{text}”建议改为具体无字图案、动作或必要短词；完整解释交给配音')
     return list(dict.fromkeys(issues))

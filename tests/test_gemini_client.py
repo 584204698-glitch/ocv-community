@@ -292,6 +292,7 @@ class GeminiClientTest(unittest.TestCase):
             "LANGUAGE_PROVIDER": "qwen",
             "GEMINI_API_KEY": "shared-relay-key",
             "GEMINI_API_BASE": "https://relay.example/v1",
+            "GEMINI_API_BASE": "https://llm.runninghub.ai/v1",
             "QWEN_MODEL": "qwen/qwen3.8-max",
         }, clear=True):
             status = gemini_client.language_provider_status()

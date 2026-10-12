@@ -7,6 +7,7 @@ credential material (not even a key suffix).
 from __future__ import annotations
 
 import os
+import json
 import threading
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
@@ -18,6 +19,7 @@ from module6_dynamic_video import DEFAULT_BASE_URL, QUERY_PATH, SUBMIT_PATH, UPL
 from .auth import require_user
 from .config import ENV_PATH, _parse_env_lines, save_project_env_values
 from .image_profiles import _legacy_document, _legacy_keys, list_profiles
+from .runninghub_workflow_video import WorkflowConfig, aiwood_workflow_preset
 
 
 router = APIRouter(prefix="/api/video-model")
@@ -26,13 +28,16 @@ _COMPATIBLE_HOSTS = {"runninghub.ai", "www.runninghub.ai", "runninghub.cn", "www
 
 
 class VideoModelRequest(BaseModel):
+    protocol: Literal['async_task', 'ark', 'runninghub_workflow'] = 'async_task'
+    workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
+    model: str = Field(default='doubao-seedance-2-0-260128', max_length=120)
     base_url: str = Field(min_length=1, max_length=2048)
     submit_path: str = Field(default=SUBMIT_PATH, min_length=1, max_length=1024)
     query_path: str = Field(default=QUERY_PATH, min_length=1, max_length=1024)
     upload_path: str = Field(default=UPLOAD_PATH, min_length=1, max_length=1024)
     api_key: str | None = Field(default=None, max_length=2048)
     api_keys: list[str] = Field(default_factory=list, max_length=10)
-    resolution: Literal["480p", "720p"] = "720p"
+    resolution: Literal["480p", "720p", "1080p"] = "720p"
     concurrency_mode: Literal["auto", "manual"] = "auto"
     per_key_concurrency: int = Field(default=1, ge=1, le=8)
     total_concurrency: int = Field(default=3, ge=1, le=32)
@@ -141,7 +146,7 @@ def load_config() -> dict[str, Any]:
     query_path = _validate_path(str(values.get("VIDEO_QUERY_PATH") or QUERY_PATH))
     upload_path = _validate_path(str(values.get("VIDEO_UPLOAD_PATH") or UPLOAD_PATH))
     resolution = str(values.get("VIDEO_RESOLUTION") or "720p").strip().lower()
-    if resolution not in {"480p", "720p"}:
+    if resolution not in {"480p", "720p", "1080p"}:
         raise ValueError("视频原生分辨率只支持 480p 或 720p，请重新保存视频接口设置")
     if any(any(char in key for char in ("\r", "\n")) for key in keys):
         raise ValueError("视频 API Key 不能包含换行")
@@ -156,21 +161,32 @@ def load_config() -> dict[str, Any]:
     except ValueError: total = 3
     capacity = len(usable_keys) * per_key
     effective = capacity if mode == "auto" else min(capacity, total)
-    return {"base_url": base, "submit_path": submit_path, "query_path": query_path,
+    protocol = values.get('VIDEO_PROTOCOL', 'async_task')
+    workflow = WorkflowConfig.model_validate(json.loads(values.get('VIDEO_RH_WORKFLOW') or '{}'))
+    if protocol == 'runninghub_workflow':
+        workflow.require_ready()
+        submit_path = '/openapi/v2/run/workflow/' + workflow.workflow_id
+    model = values.get('VIDEO_MODEL', 'doubao-seedance-2-0-260128')
+    if protocol == 'ark' and resolution == '1080p' and any(part in model for part in ('mini', 'fast')):
+        raise ValueError('Seedance Mini 和 Fast 仅支持 480p、720p，请使用标准版生成 1080p')
+    return {"protocol": protocol, "workflow": workflow.model_dump(), "model": model, "base_url": base, "submit_path": submit_path, "query_path": query_path,
             "upload_path": upload_path, "resolution": resolution,
             "api_key": usable_keys[0] if usable_keys else "", "api_keys": usable_keys,
             "key_count": len(usable_keys), "key_hints": [f"••••{key[-4:]}" for key in usable_keys],
             "concurrency_mode": mode, "per_key_concurrency": per_key,
             "total_concurrency": total, "effective_concurrency": effective,
-            "has_api_key": bool(usable_keys), "model_label": "多模态视频",
+            "has_api_key": bool(usable_keys), "model_label": model if protocol == 'ark' else "RH 币工作流" if protocol == 'runninghub_workflow' else "多模态视频",
             "source": "dedicated" if usable_keys else "image_compatible" if candidate else "missing"}
 
 
 def _public(config: dict[str, Any]) -> dict[str, Any]:
-    return {key: config[key] for key in (
+    public = {key: config[key] for key in (
         "base_url", "submit_path", "query_path", "upload_path", "resolution", "has_api_key",
         "key_count", "key_hints", "concurrency_mode", "per_key_concurrency", "total_concurrency",
-        "effective_concurrency", "model_label", "source")}
+        "effective_concurrency", "model_label", "source", "protocol", "model", "workflow")}
+    public['workflow_presets'] = [{'id': 'aiwood_h3', 'name': 'aiwood 黑科技 H3',
+                                    'config': aiwood_workflow_preset()}]
+    return public
 
 
 @router.get("")
@@ -212,7 +228,18 @@ def save_video_model(payload: VideoModelRequest, request: Request) -> dict[str, 
                     supplied = _unique_keys([*previous_keys, *supplied])
             if not supplied:
                 raise ValueError("请填写视频 API Key，或明确选择复用同站点图像接口凭据")
-            save_project_env_values({"VIDEO_API_BASE_URL": base, "VIDEO_SUBMIT_PATH": path,
+            if payload.protocol == 'ark' and urlsplit(base).hostname != 'ark.cn-beijing.volces.com':
+                raise ValueError('火山方舟官方接口请使用 ark.cn-beijing.volces.com')
+            if payload.protocol == 'runninghub_workflow':
+                payload.workflow.require_ready()
+                path = '/openapi/v2/run/workflow/' + payload.workflow.workflow_id
+                query_path = QUERY_PATH
+                upload_path = UPLOAD_PATH
+            if payload.protocol == 'async_task' and payload.resolution == '1080p':
+                raise ValueError('当前兼容接口仅支持 480p 和 720p')
+            save_project_env_values({"VIDEO_PROTOCOL": payload.protocol, "VIDEO_MODEL": payload.model,
+                                     "VIDEO_RH_WORKFLOW": json.dumps(payload.workflow.model_dump(), ensure_ascii=False),
+                                     "VIDEO_API_BASE_URL": base, "VIDEO_SUBMIT_PATH": path,
                                      "VIDEO_QUERY_PATH": query_path, "VIDEO_UPLOAD_PATH": upload_path,
                                      "VIDEO_API_KEY": supplied[0], "VIDEO_API_KEYS": ",".join(supplied[1:]),
                                      "VIDEO_RESOLUTION": payload.resolution,

@@ -12,6 +12,8 @@ from .video_text_policy import normalize_text_mode
 from .video_prompt_notices import has_prompt_warning
 from .story_production import production_story_handoff
 from .video_cast_planning import normalize_cast_plan, validate_cast_plan, validate_planning_cast
+from .video_speech import normalize_turns
+from .video_medical_director import MEDICAL_DESIGN_FIELDS, is_medical, medical_contract
 
 
 _DRAFT_FIELDS = ('id', 'slide_ids', 'kind', 'intent', 'action', 'image_prompt', 'video_prompt', 'visual_description', 'native_dialogue', 'continuity_props', 'continuity_states')
@@ -19,6 +21,13 @@ _DRAFT_FIELDS = ('id', 'slide_ids', 'kind', 'intent', 'action', 'image_prompt', 
 
 def design_snapshot(shot):
     return {key: copy.deepcopy(shot[key]) for key in _DRAFT_FIELDS if key in shot}
+
+
+def validate_visual_candidates(entry, identity):
+    if not isinstance(entry, list) or len(entry) > 2 or any(
+            not isinstance(value, str) or len(value) > 3000 for value in entry):
+        raise ValueError(f'镜头 {identity}：visual_design.candidates 必须是最多两个短文本组成的数组，每项不超过 3000 字，不能使用对象或单个字符串')
+    return entry
 
 
 def parse_srt(text):
@@ -52,25 +61,7 @@ def _normalize_speech_turns(value, source_text):
     Keep only bounded, source-anchored records. The original subtitles remain
     available to every director even if a provider omits/malforms these hints.
     """
-    if not isinstance(value, list):
-        return []
-    def compact(text):
-        return ''.join(char for char in text if char.isalnum()).casefold()
-    source = compact(source_text)
-    result = []
-    limits = dict(source_text=2000, speaker=200, addressee=200, mode=40, basis=1200)
-    for item in value[:32]:
-        if not isinstance(item, dict) or any(not isinstance(item.get(key, ''), str)
-                or len(item.get(key, '')) > limit for key, limit in limits.items()):
-            continue
-        turn = {key: item.get(key, '').strip() for key in limits}
-        anchor = compact(turn['source_text'])
-        if not anchor or anchor not in source:
-            continue
-        if turn['mode'] not in {'spoken', 'thought', 'quoted', 'narration', 'unknown'}:
-            turn['mode'] = 'unknown'
-        result.append(turn)
-    return result
+    return normalize_turns(value, source_text)
 
 
 def normalize_shots(raw, scenes, reference_ids=()):
@@ -98,8 +89,7 @@ def normalize_shots(raw, scenes, reference_ids=()):
         duration = round(end - start, 3)
         warning = ''
         if duration > 15 and kind == 'video':
-            kind = 'static'
-            warning = '超过 15 秒，暂用静态画面；可在字幕边界拆分后改为动态。'
+            warning = '本镜超过建议的 15 秒；可能增加显存占用与生成时间，建议拆分，也可按所选工作流继续尝试。'
         refs = row.get('reference_ids', [])
         if not isinstance(refs, list) or len(refs) > 8 or any(not isinstance(r, str) for r in refs) or len(set(refs)) != len(refs) or any(r not in reference_ids for r in refs):
             raise ValueError('参考素材选择无效，最多 8 张，另预留 1 张核心分镜图')
@@ -107,6 +97,7 @@ def normalize_shots(raw, scenes, reference_ids=()):
                      duration=duration, generation_duration=max(4, math.ceil(duration)) if kind == 'video' else None,
                      reference_ids=refs, warning=warning)
         clean['design_needs_review'] = bool(row.get('design_needs_review', False))
+        clean['design_review_confirmed'] = bool(row.get('design_review_confirmed', False)) and not clean['design_needs_review']
         clean['reference_audio_enabled'] = bool(row.get('reference_audio_enabled', True))
         clean['reference_audio_lipsync'] = bool(row.get('reference_audio_lipsync', True))
         if row.get('native_dialogue') is not None:
@@ -136,7 +127,7 @@ def normalize_shots(raw, scenes, reference_ids=()):
             if not isinstance(parent, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', parent):
                 raise ValueError('原镜头编号无效')
             clean['parent_shot_id'] = parent
-        for field in ('intent', 'action', 'image_prompt', 'video_prompt', 'visual_description',
+        for field in ('intent', 'user_intent', 'action', 'image_prompt', 'video_prompt', 'visual_description',
                       'motion_basis', 'progression_plan', 'planning_kind', 'kind_adjustment',
                       'attribution_correction'):
             value = row.get(field, '')
@@ -151,17 +142,24 @@ def normalize_shots(raw, scenes, reference_ids=()):
             clean[field] = list(warnings)
         for field, keys in (
             ('semantic', ('message', 'source_basis', 'fact_status', 'progression', 'continuity_requirement')),
-            ('visual_design', ('candidates', 'selection_reason', 'expression', 'human_presence', 'visible_evidence')),
+            ('visual_design', ('candidates', 'selection_reason', 'expression', 'human_presence', 'visible_evidence') + MEDICAL_DESIGN_FIELDS),
         ):
             value = row.get(field, {})
             if not isinstance(value, dict):
                 raise ValueError('镜头设计资料格式无效')
             clean[field] = {}
+            if field == 'visual_design':
+                for flag in ('presenter_visible', 'presenter_speaking'):
+                    if flag in value:
+                        if type(value[flag]) is not bool:
+                            raise ValueError(f'镜头 {identity}：{flag} 必须为布尔值')
+                        clean[field][flag] = value[flag]
             for key in keys:
+                if key in MEDICAL_DESIGN_FIELDS and key not in value:
+                    continue
                 entry = value.get(key, [] if key == 'candidates' else '')
                 if key == 'candidates':
-                    if not isinstance(entry, list) or len(entry) > 2 or any(not isinstance(v, str) or len(v) > 3000 for v in entry):
-                        raise ValueError('镜头候选方案无效')
+                    validate_visual_candidates(entry, identity)
                 elif not isinstance(entry, str) or len(entry) > 10000:
                     raise ValueError('镜头设计资料无效或过长')
                 clean[field][key] = entry
@@ -170,6 +168,8 @@ def normalize_shots(raw, scenes, reference_ids=()):
                 row['semantic']['speech_turns'], ''.join(by_id[identity]['text'] for identity in ids))
         if 'cast_plan' in row:
             clean['cast_plan'] = normalize_cast_plan(row['cast_plan'])
+        if row.get('semantic', {}).get('speech_mode') in ('none', 'dialogue', 'mixed', 'uncertain'):
+            clean['semantic']['speech_mode'] = row['semantic']['speech_mode']
         # Derive from authoritative subtitles; never trust stale/client-provided text.
         clean['source_subtitles'] = [dict(by_id[identity]) for identity in ids]
         if kind == 'video' and row.get('motion_plan') is not None:
@@ -191,6 +191,7 @@ def edit_structure(shots, scenes, action, index, boundary=None, reference_ids=()
         row.pop('motion_plan', None)
         row.pop('cast_plan', None)
         row['design_needs_review'] = True
+        row['design_review_confirmed'] = False
         row.pop('duration_repair', None)
         row['image_prompt_warnings'] = []
         row['video_prompt_warnings'] = []
@@ -286,6 +287,9 @@ def plan_storyboard(scenes, style, characters, world, references, progress, para
         parameters = {**parameters, 'project_cast': cast}
     snapshot = parameters.get('story_snapshot')
     handoff = production_story_handoff(snapshot, scenes) if snapshot is not None else None
+    from .presenter_mode import presenter_config
+    if parameters.get('presenter_mode') and not presenter_config(parameters, references):
+        raise ValueError('讲解员模式已开启，请先选择有效的人物参考图')
     from story_agents import create_story_context
     from .video_agents import (audit_storyboard, design_core_images, direct_motion, plan_groups,
                                write_image_prompts, write_video_prompts)
@@ -319,6 +323,11 @@ def plan_storyboard(scenes, style, characters, world, references, progress, para
         progress('复用已保存的全文理解，继续未完成规划。')
     else:
         progress('Agent 0：通读全文与整理人物资料')
+        medical_context = {'video_direction': {'dynamic_text_mode': normalize_text_mode(parameters.get('dynamic_text_mode'))}}
+        agent0_options = {}
+        if is_medical(medical_context):
+            from story_agents import AGENT0_SYSTEM_PROMPT
+            agent0_options['agent0_prompt_system'] = AGENT0_SYSTEM_PROMPT + medical_contract(medical_context, 'context')
         adopted = handoff if handoff and handoff['status'] == 'current' else None
         adoption_arguments = {'adopted_story': adopted} if adopted else {}
         if cast is not None:
@@ -327,7 +336,7 @@ def plan_storyboard(scenes, style, characters, world, references, progress, para
                                        content_mode=parameters.get('content_mode', 'general'),
                                        global_character_prompt=characters, world_prompt=world, require_ai_success=True,
                                        director_strategy=parameters.get('director_strategy', 'stable'),
-                                       **adoption_arguments)
+                                       speech_attribution=True, **agent0_options, **adoption_arguments)
     if handoff:
         context['story_handoff'] = copy.deepcopy(handoff)
     else:
@@ -337,6 +346,7 @@ def plan_storyboard(scenes, style, characters, world, references, progress, para
     else:
         context.pop('project_cast', None)
     context['production_fingerprint'] = fingerprint
+    context['dynamic_max_shot_duration'] = 30 if parameters.get('dynamic_max_shot_duration') == 30 else 15
     context['video_direction'] = {
         'director_revision': VIDEO_DIRECTOR_REVISION,
         'director_strategy': parameters.get('director_strategy', 'stable'),
@@ -348,9 +358,13 @@ def plan_storyboard(scenes, style, characters, world, references, progress, para
     }
     if story_uses_opening_frame(context):
         context['video_direction']['core_image_role'] = '真实开场首帧；只画此时可见的主体，后入场角色通过独立身份参考或尾帧衔接'
+    from .presenter_mode import presenter_config
+    context['video_direction']['presenter'] = presenter_config(parameters, references)
     state['context'] = context
     persist_state('全文理解')
-    mode_label = '画面优先' if context['video_direction']['dynamic_text_mode'] == 'visual_first' else '文字辅助'
+    mode_label = {'visual_first': '画面优先', 'medical_paper': '医学文献', 'text_assisted': '文字辅助'}[context['video_direction']['dynamic_text_mode']]
+    if is_medical(context):
+        context['video_direction']['core_image_role'] = '选择最能交代医学主体与尺度关系的单张参考图，可为后段宽景；不是强制首帧，视频依次展开。'
     progress(f'动态视频表达模式：{mode_label}')
     # Older final gates invalidated all completed phases for cosmetic headings.
     # Re-audit the saved results before paying to rebuild them. The fingerprint
@@ -371,7 +385,7 @@ def plan_storyboard(scenes, style, characters, world, references, progress, para
             return context, recovered
     from .video_pacing import PACING_FIELDS, pacing_policy
     arrangement = {key: parameters[key] for key in (
-        'director_strategy', 'video_orientation', *PACING_FIELDS) if key in parameters}
+        'director_strategy', 'video_orientation', 'dynamic_max_shot_duration', *PACING_FIELDS) if key in parameters}
     policy = pacing_policy(arrangement)
     if policy:
         progress(f'镜头节奏：目标 {policy["target_duration"]:g} 秒，多句镜头最长 {policy["max_duration"]:g} 秒；按字幕边界自然切换。')
@@ -390,12 +404,14 @@ def plan_storyboard(scenes, style, characters, world, references, progress, para
                               on_draft=preserve_groups, resume_rows=state.get('groups'), boundary_review=True)
         for shot in planned:
             shot['planning_kind'] = shot['kind']
-            if story_uses_opening_frame(context):
+            if story_uses_opening_frame(context) and not context['video_direction'].get('presenter'):
                 # This route adopts narration prose. Supplied narration may
                 # guide rhythm, but should not make an on-screen actor speak.
                 # Fixed/manual shots and resumable work retain their explicit choice.
                 shot['reference_audio_lipsync'] = False
-        shots = enforce_opening_motion(normalize_shots(planned, scenes))
+        shots = normalize_shots(planned, scenes)
+        if not is_medical(context):
+            shots = enforce_opening_motion(shots)
     completed = state.setdefault('completed', {})
     def pending(batch, phase):
         done = completed.get(phase, [])
@@ -410,8 +426,11 @@ def plan_storyboard(scenes, style, characters, world, references, progress, para
         if checkpoint:
             checkpoint(copy.deepcopy(context), copy.deepcopy(shots), stage)
     preserve('镜头划分')
-    for offset in range(0, len(shots), 6):
-        batch = shots[offset:offset+6]
+    # Keep structured responses below the shared output budget, including
+    # providers that spend part of that budget on reasoning.
+    design_batch_size = 3
+    for offset in range(0, len(shots), design_batch_size):
+        batch = shots[offset:offset+design_batch_size]
         needed = pending(batch, 'core')
         if needed:
             progress(f'Agent 2：设计前段核心场面与按需素材（单图 v2）{offset+1}～{offset+len(batch)}')
@@ -435,6 +454,8 @@ def plan_storyboard(scenes, style, characters, world, references, progress, para
                     semantic = update.get('semantic')
                     if isinstance(semantic, dict) and 'speech_turns' in semantic:
                         shot.setdefault('semantic', {})['speech_turns'] = semantic['speech_turns']
+                    if isinstance(semantic, dict) and 'speech_mode' in semantic:
+                        shot.setdefault('semantic', {})['speech_mode'] = semantic['speech_mode']
                     correction = update.get('attribution_correction')
                     shot['attribution_correction'] = ''
                     if isinstance(correction, str) and correction.strip() and len(correction) <= 2000:

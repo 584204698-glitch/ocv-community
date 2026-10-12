@@ -50,7 +50,7 @@ _REFERENCE_UPLOAD_LOCK = threading.Lock()
 _CLOUD_TOKEN_REFRESH_LOCK = threading.Lock()
 _CLOUD_RETRY_STATE_LOCK = threading.Lock()
 _VISUAL_CHECKPOINT_LOCK = threading.Lock()
-_REFERENCE_IMAGE_URLS: dict[tuple[str, str], str] = {}
+_REFERENCE_IMAGE_URLS: dict[tuple[str, ...], str] = {}
 # v17: stable directing now records explicit human presence, rejects visibly
 # contradictory shot instructions, and emits readable per-shot character cards.
 VISUAL_PROMPT_AGENT_VERSION = 17
@@ -258,6 +258,7 @@ def _recover_missing_scene_references(mapping, provider_configs):
                     "macro_scene_id": "scene_ref_" + scene_id,
                     "image_prompt": prompt + "\n纯场景资产，无人物、人体局部、人影或人形倒影。",
                     "character_ids": [], "reference_image_ids": [],
+                    "reference_image_paths": reference.get('reference_image_paths', []), 'reference_binding_version': 1,
                 }, pool)
             recovered[key] = str(candidate.resolve())
             _sync_visual_checkpoint(asset=candidate)
@@ -709,7 +710,7 @@ class RunningHubAccountPool:
 
     def __init__(self, configs: list[dict[str, str]], per_key_concurrency: int | None = None) -> None:
         self._configs = configs
-        server_managed_capacity = 64 if any(config.get("cloud_pool") == "1" for config in configs) else None
+        server_managed_capacity = _positive_env_int("CLOUD_IMAGE_POOL_CONCURRENCY", 10) if any(config.get("cloud_pool") == "1" for config in configs) else None
         self._configured_capacity = max(
             1,
             int(
@@ -815,6 +816,23 @@ class RunningHubAccountPool:
         with _ACCOUNT_STATE_LOCK:
             _POWER_EXHAUSTED_ACCOUNT_KEYS.add(config["api_key"])
 
+    def retry_power_exhausted_accounts(self) -> None:
+        """Allow an explicit new attempt to recheck quota, preserving active leases."""
+        with self._condition:
+            keys = {
+                config["api_key"] for config in self._configs
+                if self._inflight.get(config["api_key"], 0) == 0
+            }
+            with _ACCOUNT_STATE_LOCK:
+                _POWER_EXHAUSTED_ACCOUNT_KEYS.difference_update(keys)
+            self._power_exhausted.difference_update(keys)
+            # A cloud gateway is not an individual upstream account. Explicit
+            # retries must not inherit a previous request's gateway rejection.
+            cloud_keys = {config['api_key'] for config in self._configs
+                          if config.get('cloud_pool') == '1' and config['api_key'] in keys}
+            self._access_denied.difference_update(cloud_keys)
+            self._condition.notify_all()
+
     def mark_access_denied(self, config: dict[str, str]) -> None:
         with self._condition:
             self._access_denied.add(config["api_key"])
@@ -879,7 +897,8 @@ _SHARED_ACCOUNT_POOLS_LOCK = threading.Lock()
 
 
 def shared_runninghub_account_pool(
-    configs: list[dict[str, str]], *, namespace: str = "default"
+    configs: list[dict[str, str]], *, namespace: str = "default",
+    retry_power_exhausted: bool = False,
 ) -> RunningHubAccountPool:
     """Reuse one round-robin cursor across independently started image tasks.
 
@@ -897,6 +916,8 @@ def shared_runninghub_account_pool(
             str(config.get("reference_endpoint") or ""),
             str(config.get("ratio") or ""),
             str(config.get("resolution") or ""),
+            str(config.get("method") or "running"),
+            str(config.get("size") or ""),
             str(_positive_env_int("RUNNINGHUB_PER_KEY_CONCURRENCY", 1)),
         )
         for config in configs
@@ -907,6 +928,8 @@ def shared_runninghub_account_pool(
         if pool is None:
             pool = RunningHubAccountPool(configs)
             _SHARED_ACCOUNT_POOLS[key] = pool
+        if retry_power_exhausted:
+            pool.retry_power_exhausted_accounts()
         return pool
 
 
@@ -946,19 +969,20 @@ def _provider_configs() -> list[dict[str, str]]:
         access_token = os.getenv("CLOUD_IMAGE_POOL_ACCESS_TOKEN", "").strip()
         if not base_url or not access_token:
             raise RuntimeError("云端号池运行凭据缺失，请重新登录云端账户后重试")
-        return [{
+        from backend.app.cloud_image_channel import configure_channel
+        return [configure_channel({
             "endpoint": f"{base_url}/image-pool/generate",
             "query_url": f"{base_url}/image-pool/query",
             "upload_url": f"{base_url}/image-pool/media/upload",
             "account_url": f"{base_url}/image-pool/account-status",
             "resolution": os.getenv("CLOUD_IMAGE_POOL_RESOLUTION", "1k").strip(),
-            "ratio": '9:16' if portrait else os.getenv("RUNNINGHUB_TARGET_RATIO", "2:1").strip(),
+            "ratio": os.getenv("CLOUD_IMAGE_POOL_RATIO", "").strip() or ('9:16' if portrait else os.getenv("RUNNINGHUB_TARGET_RATIO", "2:1").strip()),
             "api_key": access_token,
             "refresh_token": os.getenv("CLOUD_IMAGE_POOL_REFRESH_TOKEN", "").strip(),
             "cloud_base_url": base_url,
             "account_label": "云端号池",
             "cloud_pool": "1",
-        }]
+        }, os.getenv("CLOUD_IMAGE_POOL_METHOD", "running"), os.getenv("CLOUD_IMAGE_POOL_SIZE", "2560x1440"))]
     # A task-selected image profile is injected by the parent process. Reloading
     # the global .env here would silently replace that per-task model choice.
     if os.getenv("OCV_IMAGE_PROFILE_ACTIVE", "").strip() != "1":
@@ -983,7 +1007,10 @@ def _provider_configs() -> list[dict[str, str]]:
         ),
         "ratio": '9:16' if portrait else os.getenv("RUNNINGHUB_TARGET_RATIO", "2:1").strip(),
         "query_url": os.getenv("OCV_IMAGE_QUERY_URL", "").strip(),
+        "reference_endpoint": os.getenv("RUNNINGHUB_IMAGE_TO_IMAGE_ENDPOINT", "").strip(),
     }
+    if base_config['protocol'] == 'openai_sync':
+        base_config.update(json.loads(os.getenv('OCV_IMAGE_SYNC_OPTIONS', '{}')))
     raw_keys = [os.getenv("RUNNINGHUB_API_KEY", "")]
     raw_keys.extend(re.split(r"[,;\s]+", os.getenv("RUNNINGHUB_API_KEYS", "")))
     raw_keys.extend(
@@ -2032,6 +2059,9 @@ def _synchronized_reference_image_ids(
             raise ValueError('当前镜头参考素材超过3张，请精简选图')
         from backend.app.reference_materials import required_every_shot_labels
         selected.update(required_every_shot_labels())
+        from backend.app.reference_materials import recover_visible_character_references
+        selected.update(recover_visible_character_references(
+            original_prompt, explicit_character_ids or [], story_plan or {}, reference_metadata()))
         if len(selected) > 3:
             raise ValueError('用户要求每张图使用的参考素材与本镜头选图合计超过3张，请精简用途说明')
         return [label for label in catalog if label in selected]
@@ -2784,7 +2814,7 @@ def _worker_count(name: str, default: int, task_count: int) -> int:
 
 def _poster_worker_count(provider_configs: list[dict[str, str]], task_count: int) -> int:
     if any(config.get("cloud_pool") == "1" for config in provider_configs):
-        return max(1, task_count)
+        return max(1, min(task_count, _positive_env_int("CLOUD_IMAGE_POOL_CONCURRENCY", 10)))
     per_key = _positive_env_int("RUNNINGHUB_PER_KEY_CONCURRENCY", 1)
     account_capacity = max(1, len(provider_configs) * per_key)
     mode = os.getenv("RUNNINGHUB_CONCURRENCY_MODE", "auto").strip().lower()
@@ -3159,6 +3189,8 @@ def _submit_poster_request(
         endpoint = str(config.get("reference_endpoint") or "").strip() or \
             os.getenv("RUNNINGHUB_IMAGE_TO_IMAGE_ENDPOINT", "").strip() or \
             str(config["endpoint"]).replace("/text-to-image", "/image-to-image")
+    from backend.app.cloud_image_channel import generation_payload
+    payload = generation_payload(payload, config)
     if config.get("cloud_pool") == "1":
         payload["clientJobId"] = _cloud_client_job_id(macro, payload)
     response = _request_with_cloud_refresh(
@@ -3170,9 +3202,13 @@ def _submit_poster_request(
         json=payload,
         timeout=60,
     )
+    if response.status_code in {404, 405, 422}:
+        raise RuntimeError(f'图像提交接口 HTTP {response.status_code}：请检查协议、路径、模型和账号权限；不是网络抖动，已停止重试')
     try:
         submitted = response.json()
     except ValueError as exc:
+        if 400 <= response.status_code < 500 and response.status_code not in {408, 429}:
+            raise RuntimeError(f'图像提交接口 HTTP {response.status_code}：接口协议、路径或权限错误，已停止重试') from exc
         response.raise_for_status()
         raise RunningHubTransientError("第三方生成图接口返回了无效 JSON") from exc
     if not isinstance(submitted, dict):
@@ -3227,7 +3263,7 @@ def _submit_poster(macro: dict[str, Any], config: dict[str, str]) -> PosterTask:
         # Its exceptions deliberately bypass the asynchronous account retry loop.
         rendered = render_openai_image(prepared, config, output)
         return PosterTask(macro=prepared, output=rendered, task_id=None)
-    if config.get('protocol', 'async_task') != 'async_task':
+    if config.get('protocol', 'async_task') not in {'async_task', 'openai_sync'}:
         raise ValueError('不支持的图像接口协议，请重新选择模型配置')
     progress_label = str(macro.get("progress_label") or poster_id)
     if output.is_file() and output.stat().st_size > 0:
@@ -3235,6 +3271,15 @@ def _submit_poster(macro: dict[str, Any], config: dict[str, str]) -> PosterTask:
         return PosterTask(macro=macro, output=output, task_id=None)
 
     session = _new_session()
+    if config.get('protocol') == 'openai_sync':
+        from backend.app.openai_image_adapter import render
+        prepared = dict(macro)
+        if (not prepared.get('reference_image_paths') and prepared.get('reference_image_ids')
+                and not prepared.get('reference_binding_version')):
+            from backend.app.reference_materials import bind_material_references
+            prepared = bind_material_references([prepared], _reference_image_catalog())[0]
+        render(prepared, config, session, output)
+        return PosterTask(macro=prepared, output=output, task_id=None)
     try:
         task_id = _submit_poster_request(macro, config, session)
     except requests.RequestException as exc:
@@ -3488,7 +3533,12 @@ def _render_poster_with_retry(
                 config = account_pool.acquire_waiting_account()
                 queued = True
             continue
-        except RunningHubAccessDenied:
+        except RunningHubAccessDenied as exc:
+            if config.get('cloud_pool') == '1':
+                account_pool.release(config)
+                # Preserve the actual rejection and fail this request only;
+                # never blacklist the entire server-managed pool.
+                raise
             account_pool.mark_access_denied(config)
             print(
                 f"{poster_id} 的 {config['account_label']} 被当前站点或模型拒绝，切换到下一个账号。",
@@ -3597,7 +3647,7 @@ def render_posters_concurrently(
         return []
 
     uses_cloud_pool = any(config.get("cloud_pool") == "1" for config in provider_configs)
-    uses_native_images = any(config.get("protocol") == "openai_images" for config in provider_configs)
+    uses_native_images = any(config.get("protocol") in {"openai_images", "openai_sync"} for config in provider_configs)
     active_workers = _poster_worker_count(provider_configs, len(mapping))
     account_pool = RunningHubAccountPool(
         provider_configs,
@@ -3608,7 +3658,7 @@ def render_posters_concurrently(
         for index, macro in enumerate(mapping, 1)
     ]
     if uses_cloud_pool:
-        concurrency_label = f"云端全量入队 {active_workers}，并发由服务器调度"
+        concurrency_label = f"云端提交并发 {active_workers}，执行由服务器调度"
     else:
         mode = os.getenv("RUNNINGHUB_CONCURRENCY_MODE", "auto").strip().lower()
         per_key = _positive_env_int("RUNNINGHUB_PER_KEY_CONCURRENCY", 1)
@@ -3837,18 +3887,28 @@ def run_online_poster_engine() -> None:
             mapping = bind_material_references(mapping, _reference_image_catalog())
             from scene_reference_coordinator import plan_scene_references, bind_scene_references
             scene_cache = VISUAL_DIR / "scene_reference_plan.json"
+            from backend.app.reference_materials import reference_metadata
+            scene_catalog = _reference_image_catalog()
+            scene_metadata = {row.get('label'): row for row in reference_metadata()}
+            scene_source = {'subtitles': scenes, 'references': [
+                {**scene_metadata.get(label, {}), 'id': label} for label in scene_catalog]}
             scene_plan = plan_scene_references(
-                mapping, scenes, scene_cache, os.getenv("VISUAL_STYLE_PROMPT", "")
+                mapping, scene_source, scene_cache, os.getenv("VISUAL_STYLE_PROMPT", "")
             ) if os.getenv("OCV_SCENE_REFERENCES_ENABLED", "1") == "1" else {"scenes": []}
             reference_paths = {}
             if scene_plan["scenes"]:
                 print(f"场景参考：发现 {len(scene_plan['scenes'])} 个重复真实场景，将先生成无人参考图（产生额外图片费用，续跑复用）。", flush=True)
                 scene_pool = RunningHubAccountPool(provider_configs, per_key_concurrency=1)
                 for entry in scene_plan["scenes"]:
+                    ids = entry.get('reference_ids', [])
+                    if not isinstance(ids, list) or len(ids) > 3 or any(not isinstance(i, str) or i not in scene_catalog for i in ids) or len(set(ids)) != len(ids):
+                        raise ValueError('场景参考素材选择无效，请重新规划')
+                    entry['reference_image_paths'] = [scene_catalog[i] for i in ids]
                     reference_macro = {
                         "macro_scene_id": "scene_ref_" + entry["scene_id"],
                         "image_prompt": entry["reference_prompt"] + "\n纯场景资产，无人物、人体局部、人影或人形倒影。",
                         "character_ids": [], "reference_image_ids": [],
+                        "reference_image_paths": entry['reference_image_paths'], 'reference_binding_version': 1,
                     }
                     reference_paths[entry["scene_id"]] = _render_poster_with_retry(reference_macro, scene_pool)
                     _sync_visual_checkpoint(asset=reference_paths[entry["scene_id"]])
@@ -3915,7 +3975,7 @@ def _reference_image_url(config: dict[str, str], raw_path: str | None = None) ->
     path = Path(raw_path)
     if not raw_path or not path.is_file():
         return None
-    cache_key = (config["api_key"], str(path.resolve()))
+    cache_key = (config["api_key"], config.get("method", "running"), config.get("upload_url", ""), str(path.resolve()))
     with _REFERENCE_UPLOAD_LOCK:
         cached = _REFERENCE_IMAGE_URLS.get(cache_key)
         if cached:
@@ -3965,6 +4025,10 @@ def _reference_image_url(config: dict[str, str], raw_path: str | None = None) ->
         if response is not None:
             response.close()
         if not url:
+            if config.get("cloud_pool") == "1" and config.get("method") == "ican":
+                raise RunningHubReferenceUploadError(
+                    "ICAN 参考图上传失败，已停止生成；请重新上传后重试"
+                ) from upload_error
             # Standard-model resource fields such as ``imageUrls`` accept a
             # Base64 Data URI as well as a public URL. Some RunningHub account
             # types return a successful upload envelope without ``download_url``;

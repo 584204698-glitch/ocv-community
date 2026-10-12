@@ -9,11 +9,14 @@ import shutil
 import subprocess
 import threading
 import uuid
+import tempfile
+import base64
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from .subtitle_layout import normalize as normalize_layout, write_ass
 
 from . import video_studio as studio
 from .pipeline import (ffmpeg_binary, ffprobe_binary, probe_media_duration, _subtitle_filter_path,
@@ -28,6 +31,7 @@ class ExportRequest(BaseModel):
     use_video_audio: bool = True
     narration_volume: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     end_title_text: str | None = Field(default=None, max_length=80)
+    subtitle_layouts: dict | None = None
 
 
 def _narration_volume(record):
@@ -37,9 +41,91 @@ def _narration_volume(record):
     return value
 
 
-def _run(command, label):
+class LayoutPreviewRequest(BaseModel):
+    subtitle_layouts: dict
+    shot_id: str
+    text: str = '从一段文字开始，让每个想法被看见。'
+    video_render_variant: str = 'both'
+
+
+def presentation(record, layouts=None):
+    params = record.get('creation_parameters') or {}
+    return normalize_layout(dict(
+        video_orientation='portrait' if record.get('settings', {}).get('ratio') == '9:16' else 'landscape',
+        subtitle_layouts=layouts if layouts is not None else params.get('subtitle_layouts', {})))
+
+
+def frame_filter(layout):
+    w, h, scale = layout['width'], layout['height'], layout['frame_scale']
+    sw, sh = max(2, round(w*scale/2)*2), max(2, round(h*scale/2)*2)
+    return (f'setpts=PTS-STARTPTS,scale={sw}:{sh}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[placed];'
+            f'color=c=black:s={w}x{h}:r=30[canvas];'
+            f'[canvas][placed]overlay=x={w*layout["frame_x"]/100:.3f}-overlay_w/2:'
+            f'y={h*layout["frame_y"]/100:.3f}-overlay_h/2:shortest=1,fps=30,format=yuv420p')
+
+
+def _video_duration(source):
+    """Use the video track, since container duration may belong to longer audio."""
+    result = subprocess.run([ffprobe_binary(), '-v', 'error', '-select_streams', 'v:0',
+                             '-show_entries', 'stream=duration', '-of', 'json', str(source)],
+                            capture_output=True, text=True, check=True)
+    streams = json.loads(result.stdout).get('streams', [])
+    if not streams:
+        raise ValueError(f'动态素材没有视频轨：{source.name}')
+    try:
+        duration = float(streams[0].get('duration', ''))
+        if duration > 0:
+            return duration
+    except (TypeError, ValueError):
+        pass
+    # Some containers (notably MKV) omit stream duration. Packet timestamps
+    # remain authoritative; do not silently revert to the audio/container.
+    result = subprocess.run([ffprobe_binary(), '-v', 'error', '-select_streams', 'v:0',
+                             '-show_packets', '-show_entries', 'packet=pts_time,duration_time',
+                             '-of', 'json', str(source)], capture_output=True, text=True, check=True)
+    spans = [(float(p['pts_time']), float(p.get('duration_time') or 0))
+             for p in json.loads(result.stdout).get('packets', []) if 'pts_time' in p]
+    if not spans:
+        raise ValueError(f'无法读取动态素材的视频时长：{source.name}')
+    duration = max(start + length for start, length in spans) - min(start for start, _ in spans)
+    if duration <= 0:
+        raise ValueError(f'动态素材视频时长无效：{source.name}')
+    return duration
+
+
+@router.post('/{identity}/layout-preview')
+def layout_preview(identity: str, data: LayoutPreviewRequest, request: Request):
+    path = studio.directory(studio.require_user(request)['id'], identity)
+    record = studio.read(path)
+    shot = next((s for s in record.get('shots', []) if s['id'] == data.shot_id), None)
+    if not shot:
+        raise HTTPException(404, '预览镜头不存在')
+    try:
+        source = _asset(path, shot.get('image') or shot.get('video'))
+    except ValueError as exc:
+        raise HTTPException(409, '此镜头尚无可用于预览的素材，请先生成或替换图片。') from exc
+    layout = presentation(record, data.subtitle_layouts)
+    with tempfile.TemporaryDirectory(prefix='ocv-layout-preview-') as folder:
+        root = Path(folder)
+        srt = root / 'preview.srt'
+        srt.write_text('1\n00:00:00,000 --> 00:00:05,000\n'+data.text[:160]+'\n', encoding='utf-8')
+        ass = write_ass(srt, root / 'preview.ass', layout)
+        vf = frame_filter(layout)
+        if data.video_render_variant != 'raw':
+            vf += f",ass=filename='{_subtitle_filter_path(ass)}'"
+        output = root / 'frame.png'
+        image_input = ['-loop', '1'] if shot.get('image') else []
+        try:
+            _run([ffmpeg_binary(), '-y', *image_input, '-i', str(source), '-vf', vf, '-frames:v', '1', str(output)], '布局预览', timeout=30)
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            raise HTTPException(422, '本地布局预览未能完成，请检查素材或稍后重试；布局设置仍然保留。') from exc
+        return dict(image='data:image/png;base64,'+base64.b64encode(output.read_bytes()).decode(),
+                    engine='动态视频 / FFmpeg', width=layout['width'], height=layout['height'])
+
+
+def _run(command, label, timeout=None):
     completed = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace',
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0, check=False)
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0, check=False, timeout=timeout)
     if completed.returncode:
         detail = (completed.stderr or completed.stdout or 'unknown error').strip()[-3000:]
         raise RuntimeError(f'{label}失败：{detail}')
@@ -238,8 +324,8 @@ def _render(path, record):
     output_root.mkdir(parents=True)
     clips = []
     use_video_audio = bool((record.get('export_settings') or {}).get('use_video_audio', True))
-    base_vf = (f'scale={width}:{height}:force_original_aspect_ratio=decrease,'
-               f'pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p')
+    layout = presentation(record)
+    base_vf = frame_filter(layout)
     for index, (shot, source, segment) in enumerate(zip(record['shots'], sources, segments), 1):
         duration, lead = segment['duration'], segment['lead']
         content_duration = segment['content_duration']
@@ -250,9 +336,25 @@ def _render(path, record):
             command += ['-loop', '1', '-i', str(source)]
         else:
             command += ['-i', str(source)]
+        stretch = 1.0
+        if shot['kind'] == 'video':
+            source_duration = _video_duration(source)
+            # Only narration resync explicitly authorizes retiming. Ordinary
+            # shots keep their performed timing and hold the final frame;
+            # leading/trailing timeline gaps never contribute to the stretch.
+            adjustment = shot.get('audio_timing_adjustment') or {}
+            if adjustment.get('mode') == 'trim_or_slow' and content_duration > source_duration + 0.03:
+                stretch = content_duration / source_duration
         keep_source_audio = bool(use_video_audio and shot['kind'] == 'video' and _has_audio_stream(source))
         audio_filter = ('aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,'
-                        f'atrim=duration={content_duration:.9f},asetpts=PTS-STARTPTS,')
+                        'asetpts=PTS-STARTPTS,')
+        if keep_source_audio and stretch > 1:
+            tempo = 1 / stretch
+            while tempo < .5:
+                audio_filter += 'atempo=0.5,'
+                tempo /= .5
+            audio_filter += f'atempo={tempo:.9f},'
+        audio_filter += f'atrim=duration={content_duration:.9f},'
         if lead:
             audio_filter += f'adelay={round(lead * 48000)}S:all=1,'
         audio_filter += f'apad,atrim=end_sample={segment["frames"] * 1600}'
@@ -261,7 +363,7 @@ def _render(path, record):
         else:
             command += ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
                         '-map', '0:v:0', '-map', '1:a:0', '-af', audio_filter]
-        vf = (f'setpts=PTS-STARTPTS,trim=duration={content_duration:.9f},fps=30,'
+        vf = (f'setpts={stretch:.9f}*(PTS-STARTPTS),trim=duration={content_duration:.9f},fps=30,'
               f'tpad=start_mode=clone:start_duration={lead:.9f}:stop_mode=clone:stop_duration={duration:.9f},'
               f'trim=end_frame={segment["frames"]},setpts=N/(30*TB),{base_vf}')
         if index == len(sources):
@@ -291,9 +393,8 @@ def _render(path, record):
           '-movflags', '+faststart', str(raw)], '配音与音效合成')
     shutil.copy2(srt, output_root / '最终字幕.srt')
     subtitled = output_root / '最终视频_字幕版.mp4'
-    style = _subtitle_style(record, height)
-    ass = _subtitle_ass(srt, work / 'subtitles.ass', width, height)
-    subtitle_filter = f"subtitles=filename='{_subtitle_filter_path(ass)}':charenc=UTF-8:force_style='{style}'"
+    ass = write_ass(srt, work / 'subtitles.ass', layout)
+    subtitle_filter = f"ass=filename='{_subtitle_filter_path(ass)}'"
     _run([ffmpeg_binary(), '-y', '-i', str(raw), '-vf', subtitle_filter, '-c:v', 'libx264', '-preset', 'fast',
           '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', str(subtitled)], '字幕版合成')
     shutil.copy2(audio, output_root / '配音.wav')
@@ -352,12 +453,10 @@ def reconcile_source_job(record, user_id: int) -> bool:
     else:
         job.request.pop('_dynamic_video_export_review', None)
     job.request['_dynamic_video_project_id'] = project_id
-    if job.request.get('_dynamic_audio_source_dir'):
-        job.request['_step_output_dir'] = job.request['_dynamic_audio_source_dir']
-        job.request['_dynamic_video_output_dir'] = output_root.name
-    else:
-        # Legacy associations are repaired only by explicit audio continuation.
-        job.request['_step_output_dir'] = output_root.name
+    # Keep the guided task's narration workspace stable.  Replacing this with
+    # the final-video folder made later sentence-level TTS edits write into an
+    # export directory that has no editable subtitle timeline.
+    job.request['_dynamic_video_output_dir'] = output_root.name
     job.request['_step_mode_stage'] = 'completed'
     already_synced = (
         job.status == 'completed'
@@ -465,8 +564,17 @@ def start_export_for_user(identity: str, data: ExportRequest, user: dict, *, rev
         path = studio.directory(user_id, identity)
         record = studio.read(path)
         studio.editable(record, data.revision)
-        if record['status'] not in {'video_review', 'video_generation_ready', 'export_failed', 'completed'}:
+        if record.get('video_waiting_queue') or any(shot.get('video_queued') or shot.get('video_waiting')
+                                                   for shot in record.get('shots', [])):
+            raise HTTPException(409, '请先完成或取消生成队列，再合成成片')
+        all_static_ready = (bool(record.get('shots')) and
+                            all(shot.get('kind') == 'static' and shot.get('image_status') == 'completed'
+                                for shot in record['shots']))
+        if record['status'] not in {'video_review', 'video_generation_ready', 'export_failed', 'completed'} and not (
+                record['status'] == 'video_generation_ready' and all_static_ready):
             raise HTTPException(409, '请先完成全部动态镜头')
+        if not record.get('shots'):
+            raise HTTPException(409, '项目没有可合成的镜头')
         missing = [shot['id'] for shot in record['shots'] if shot['kind']=='video' and shot.get('video_status')!='completed']
         if missing:
             raise HTTPException(409, f'仍有 {len(missing)} 个动态镜头未完成')
@@ -493,6 +601,8 @@ def start_export_for_user(identity: str, data: ExportRequest, user: dict, *, rev
         if any(ord(c) < 32 for c in end_title_text):
             raise HTTPException(400, '片尾文字请使用单行文本')
         studio.ACTIVE.add(str(path))
+        if data.subtitle_layouts is not None:
+            record.setdefault('creation_parameters', {})['subtitle_layouts'] = data.subtitle_layouts
         record.update(status='exporting', error='', revision=record['revision']+1,
                       export_settings={'use_video_audio': data.use_video_audio, 'narration_volume': narration_volume,
                                        'end_title_text': end_title_text})

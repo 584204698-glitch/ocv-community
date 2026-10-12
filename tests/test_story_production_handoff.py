@@ -208,7 +208,8 @@ class StoryProductionPipelineTest(StoryProductionFixture, unittest.TestCase):
         self.pipeline.validate_step_audio_snapshot = Mock()
         self.pipeline.user_reference_image_path = Mock(side_effect=AssertionError("No reference assets in this fixture"))
         self.tts = ModuleType("backend.app.tts_editor")
-        self.tts.tts_editor = SimpleNamespace(status=Mock(return_value={"status": "idle"}), commit_step_review=Mock())
+        self.tts.tts_editor = SimpleNamespace(status=Mock(return_value={"status": "idle"}), commit_step_review=Mock(),
+                                             _project_dir=Mock(return_value=self.source_dir))
         self.boundaries.enter_context(patch.dict(sys.modules, {
             "backend.app.pipeline": self.pipeline, "backend.app.tts_editor": self.tts,
         }))
@@ -254,6 +255,10 @@ class StoryProductionPipelineTest(StoryProductionFixture, unittest.TestCase):
         reading.create_story_context = agent0
         with ExitStack() as stack:
             stack.enter_context(patch.dict(sys.modules, {"story_agents": reading}))
+            # Keep the real staging review/validation boundary, while isolating
+            # its independent language-model call like the other directors.
+            stack.enter_context(patch.object(self.agents, "ask_json", side_effect=lambda system, payload:
+                {"reviews": [{"id": shot["id"], "problems": []} for shot in payload["shots"]]}))
             for name, mock in doubles.items():
                 stack.enter_context(patch.object(self.agents, name, mock))
             settings = record["settings"]

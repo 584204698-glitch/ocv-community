@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from backend.app.main import GenerateRequest
-from backend.app.indextts25_local import IndexTTS25Config
+from backend.app.indextts25_local import IndexTTS25Config, load_indextts25_config
 from backend.app.gemini_client import GeminiOutputTruncated
 from backend.app.tts_text_normalization import normalize_tts_text
 from backend.app.tts_editor import TtsEditor
@@ -19,6 +19,12 @@ from backend.app.tts_segmentation import segment_indextts25_text
 
 
 class IndexTTS25IntegrationTests(unittest.TestCase):
+    def require_optional_tokenizer_runtime(self):
+        config = load_indextts25_config()
+        vocab = config.model_dir / 'multilingual_zh_ja_yue_char_del.tiktoken'
+        if not vocab.is_file() or not config.python.is_file():
+            self.skipTest('Optional IndexTTS-2.5 tokenizer model/runtime is not installed in this public source checkout')
+
     def test_local_runner_disables_unavailable_intel_svml(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -60,6 +66,17 @@ class IndexTTS25IntegrationTests(unittest.TestCase):
         with patch("module1_agent_director.subprocess.Popen", return_value=process):
             with self.assertRaisesRegex(RuntimeError, "NVIDIA 显卡或驱动"):
                 _run_and_stream(["python"], cwd=Path("."), env={})
+
+    def test_index_tts_dll_failure_has_runtime_repair_instructions(self):
+        process = SimpleNamespace(stdout=[
+            'OSError: [WinError 126] Error loading "torch/lib/c10.dll" or one of its dependencies.\n'
+        ], wait=lambda: 1)
+        with patch("module1_agent_director.subprocess.Popen", return_value=process):
+            with self.assertRaises(RuntimeError) as raised:
+                _run_and_stream(["python"], cwd=Path("."), env={})
+        self.assertIn('Visual C++ x64', str(raised.exception))
+        self.assertIn('vc_redist.x64.exe', str(raised.exception))
+        self.assertIn('尚未开始配音', str(raised.exception))
 
     def test_tts_subtitle_sync_maps_by_time_not_sentence_number(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -158,6 +175,7 @@ class IndexTTS25IntegrationTests(unittest.TestCase):
         self.assertEqual(GenerateRequest(tts_emotion_weight=0).tts_emotion_weight, 0)
 
     def test_25_short_text_skips_agent_and_stays_one_task(self):
+        self.require_optional_tokenizer_runtime()
         with tempfile.TemporaryDirectory() as temporary:
             text_path = Path(temporary) / "sample.txt"
             text_path.write_text("第一句很短。\n第二句明显更长，但仍应作为同一个2.5基准任务。", encoding="utf-8")
@@ -266,6 +284,7 @@ class IndexTTS25IntegrationTests(unittest.TestCase):
         self.assertTrue(all(len(chunk) <= 110 for chunk in chunks))
 
     def test_25_real_tokenizer_enforces_official_110_token_limit(self):
+        self.require_optional_tokenizer_runtime()
         text = ("ATP是细胞可以直接使用的能量货币，它连接着生命活动与能量转换。" * 20)
         chunks, _, total = segment_indextts25_text(text, agent_enabled=False)
         self.assertGreater(total, 110)

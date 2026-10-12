@@ -11,11 +11,12 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from .gemini_client import generate_gemini_text, parse_json_response
-from .video_agents import _numbered_dynamic_shots, _project_cast, ask_json, write_image_prompts, write_video_prompts
+from .video_agents import _numbered_dynamic_shots, _project_cast, ask_json, design_core_images, direct_motion, write_image_prompts, write_video_prompts
 from .video_director_contracts import (SPEECH_ATTRIBUTION_CONTRACT, STORY_NARRATION_AUDIO_RULE,
                                        project_cast_contract, story_frame_contract, video_input_contract,
                                        story_uses_opening_frame, opening_frame_plan_issues)
 from .video_motion_plan import normalize_motion_plan, repair_generated_participant_membership, render_motion_action
+from .video_medical_director import medical_contract
 from .video_text_policy import (VISUAL_FIRST, dynamic_text_mode, text_mode_contract,
                                 visual_first_plan_issues)
 
@@ -137,12 +138,23 @@ def revise_motion(context: dict, shot: dict, references: list[dict], action: str
         raise ValueError('实际视频输入只用于视频输入同步')
     if not action.strip() and refresh_basis != 'image':
         raise ValueError('请先填写动态表达')
-    payload = {'story_context': context, 'shot': copy.deepcopy(shot),
+    current_shot = copy.deepcopy(shot)
+    for key in ('motion_plan', 'video_prompt', 'visual_description', 'visual_design',
+                'previous_designs', 'progression_plan', 'semantic', 'image_analysis'):
+        current_shot.pop(key, None)
+    if context.get('video_direction', {}).get('presenter'):
+        current_shot['visual_design'] = {key: shot.get('visual_design', {}).get(key, False)
+                                       for key in ('presenter_visible', 'presenter_speaking')}
+    current_shot['action'] = action.strip() if refresh_basis == 'action' else ''
+    current_shot['image_prompt'] = core_basis if refresh_basis == 'image' else ''
+    payload = {'story_context': context, 'shot': current_shot,
                'manual_action': action.strip(), 'core_basis': core_basis.strip(),
                'basis_kind': basis_kind,
                'refresh_basis': refresh_basis,
                'reference_catalog': references}
-    system = MOTION_SYSTEM
+    from .presenter_mode import presenter_contract
+    system = MOTION_SYSTEM + medical_contract(context, 'motion') + presenter_contract(context)
+    system += '\n本次重建动作方案：不得从旧镜头补回未被当前依据要求的主体、时代、分屏或场景。refresh_basis=image 时仅以实际核心画面和本镜字幕构建自然动作；refresh_basis=action 时以 manual_action 为首要画面要求。'
     if story_uses_opening_frame(context):
         system = system.replace('核心参考以视频靠前阶段为主，不要求回到首帧。',
                                 '本镜核心图是实际开场首帧，只记录开始时可见的主体与文字。')
@@ -221,7 +233,7 @@ def _revise_video_input_motion(context, shot, references, action, core_basis, vi
 def refresh(context: dict, style: str, shot: dict, references: list[dict], *,
             basis: str, action: str, image_prompt: str, image_path: Path | None = None,
             force_vision: bool = False, image_analysis: dict | None = None,
-            action_only: bool = False, video_inputs: dict | None = None) -> tuple[dict, dict | None]:
+            action_only: bool = False, video_inputs: dict | None = None, scenes: list[dict] | None = None) -> tuple[dict, dict | None]:
     if shot.get('native_dialogue'):
         from .video_native_staging import refresh as native_refresh
         return native_refresh(context, style, shot, references, basis=basis, action=action,
@@ -241,30 +253,82 @@ def refresh(context: dict, style: str, shot: dict, references: list[dict], *,
     if video_inputs is not None:
         raise ValueError('实际视频输入只用于视频输入同步')
     updated = copy.deepcopy(shot)
-    updated['action'] = action.strip()
+    if basis == 'full':
+        # Old creative output must not constrain a fresh single-shot design.
+        for key in ('action', 'motion_plan', 'image_prompt', 'video_prompt',
+                    'visual_description', 'visual_design', 'progression_plan',
+                    'previous_designs', 'attribution_correction', 'intent', 'semantic', 'motion_basis'):
+            updated.pop(key, None)
+        updated['design_needs_review'] = True
+        if shot.get('user_intent'):
+            updated['intent'] = shot['user_intent']
+        # Rebuild meaning from the current subtitle ownership even after the
+        # user has confirmed an inherited split image/design.
+        if scenes:
+            selected_ids = set(updated.get('slide_ids', []))
+            updated['source_subtitles'] = [copy.deepcopy(row) for row in scenes if row['slide_id'] in selected_ids]
+        core = design_core_images(context, scenes or [], [copy.deepcopy(updated)], references)[0]
+        for key in ('visual_description', 'visual_design', 'reference_ids', 'cast_plan', 'semantic',
+                    'intent', 'progression_plan', 'attribution_correction'):
+            if key in core:
+                if key == 'semantic' and isinstance(core[key], dict):
+                    updated.setdefault('semantic', {}).update(copy.deepcopy(core[key]))
+                elif key not in {'intent', 'progression_plan'} or str(core[key] or '').strip():
+                    updated[key] = copy.deepcopy(core[key])
+        allowed = {item['id'] for item in references}
+        if not isinstance(updated.get('reference_ids', []), list) or any(
+                item not in allowed for item in updated.get('reference_ids', [])):
+            raise ValueError('本镜重规划返回了不存在的参考素材，请重试')
+        if shot.get('user_intent'):
+            updated['intent'] = shot['user_intent']
+        motion = direct_motion(context, [updated], references)[0]
+        updated.update(action=motion['action'], motion_plan=motion['motion_plan'])
+        for writer, field in ((lambda: write_image_prompts(context, style, [updated], references), 'image_prompt'),
+                              (lambda: write_video_prompts(context, [updated], references), 'video_prompt')):
+            row = writer()[0]
+            updated[field] = row[field]
+            updated[field + '_warnings'] = row.get(field + '_warnings', [])
+        return updated, None
+    updated['action'] = action.strip() if basis == 'action' else ''
     updated['image_prompt'] = image_prompt.strip()
     analysis = image_analysis if force_vision and image_analysis else (
         analyze_image(image_path) if force_vision and image_path else None)
     core_basis = analysis['description'] if analysis else updated['image_prompt']
+    if basis == 'action':
+        core_basis = '画风：' + style + '\n用户表达要求：' + str(updated.get('user_intent') or updated.get('intent') or '')
     basis_kind = 'image_analysis' if analysis else 'image_prompt'
     updated['motion_plan'] = revise_motion(context, updated, references, updated['action'], core_basis,
                                           basis_kind, refresh_basis=basis)
+    for key in ('visual_design', 'semantic', 'progression_plan', 'video_prompt', 'previous_designs'):
+        updated.pop(key, None)
+    if context.get('video_direction', {}).get('presenter'):
+        updated['visual_design'] = {key: shot.get('visual_design', {}).get(key, False)
+                                    for key in ('presenter_visible', 'presenter_speaking')}
+    updated['visual_description'] = updated['motion_plan'].get('reference_visual', core_basis)
+    original_image_prompt = updated['image_prompt']
+    updated['image_prompt'] = core_basis if basis == 'image' else ''
     if not updated['action']:
         updated['action'] = '\n'.join(str(beat.get('action') or '') for beat in updated['motion_plan']['beats'])
     if action_only:
         if not updated['action'].strip():
             raise ValueError('未生成有效动态表达，请重试本镜提示词更新')
+        updated['image_prompt'] = original_image_prompt
         return updated, analysis
     # A manual revision may intentionally change the speaker. The revised plan
     # now owns that relation; do not let finalizers revive automatic attribution.
     if isinstance(updated.get('semantic'), dict):
         updated['semantic'].pop('speech_turns', None)
+        updated['semantic'].pop('speech_mode', None)
+    context = copy.deepcopy(context)
+    context.pop('speech_attribution', None)
     updated['attribution_correction'] = ''
     if basis == 'action':
         image_rows = write_image_prompts(context, style, [updated], references)
         updated['image_prompt'] = image_rows[0]['image_prompt']
         updated['image_prompt_warnings'] = image_rows[0].get('image_prompt_warnings', [])
-    video_rows = write_video_prompts(context, [updated], references)
+    video_rows = write_video_prompts(context, [copy.deepcopy(updated)], references)
     updated['video_prompt'] = video_rows[0]['video_prompt']
     updated['video_prompt_warnings'] = video_rows[0].get('video_prompt_warnings', [])
+    if basis == 'image':
+        updated['image_prompt'] = original_image_prompt
     return updated, analysis

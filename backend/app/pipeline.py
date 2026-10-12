@@ -98,6 +98,14 @@ class GenerationPaused(RuntimeError):
     """A step-mode checkpoint deliberately stopped the pipeline."""
 
 
+class CommandExecutionError(RuntimeError):
+    """Keep the child's exit status available for narrowly scoped recovery."""
+
+    def __init__(self, message: str, return_code: int):
+        super().__init__(message)
+        self.return_code = return_code
+
+
 def default_project_name() -> str:
     return f"项目_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4].upper()}"
 
@@ -1624,12 +1632,14 @@ def resolve_asr_python() -> str:
     if configured:
         detail = f": {last_error}" if last_error else ""
         raise RuntimeError(
-            f"ASR_PYTHON 不可用或缺少 faster-whisper/ctranslate2: {configured}{detail}"
+            f"字幕识别运行环境检查未通过: {configured}{detail}。"
+            "配音检查点已保留；若首次加载超时，可稍后断点续跑。"
         )
     raise RuntimeError(
         "未找到可运行 Faster-Whisper 的 Python。请安装 requirements.txt，"
         "或通过 ASR_PYTHON 指定已有环境。已检查: "
         + ", ".join(checked)
+        + (f"；检查详情：{last_error}" if last_error else "")
     )
 
 
@@ -1720,9 +1730,39 @@ def run_command(
     store.raise_if_cancelled(job)
     if return_code != 0:
         if fatal_error:
-            raise RuntimeError(fatal_error)
-        raise RuntimeError(f"{label} 失败，退出码 {return_code}")
+            raise CommandExecutionError(fatal_error, return_code)
+        raise CommandExecutionError(f"{label} 失败，退出码 {return_code}", return_code)
     store.log(job, f"完成: {label}")
+
+
+def run_asr_stage(job: Job, store: JobStore, asr_python: str) -> None:
+    """Recover native GPU crashes in a new CPU process, once, in auto mode."""
+    command = [asr_python, "module2_scene_director.py"]
+    try:
+        run_command(job, store, command, STEPS[1][1])
+    except CommandExecutionError as exc:
+        requested_device = os.getenv("ASR_DEVICE", "auto").strip().lower()
+        windows_native = exc.return_code & 0xFFFFFFFF
+        native_crash = windows_native in {
+            0xC0000005,  # access violation
+            0xC000001D,  # illegal instruction
+            0xC0000374,  # heap corruption
+            0xC0000409,  # native fail-fast
+        } or exc.return_code in {-11, -6, -4}
+        if requested_device != "auto" or not native_crash:
+            raise
+        store.raise_if_cancelled(job)
+        store.log(job, f"字幕识别进程发生原生崩溃（退出码 {exc.return_code}），自动改用 CPU / int8 重试一次；已生成配音保持不变。")
+        store.update(job, message="字幕识别正在转用 CPU，速度可能稍慢")
+        try:
+            run_command(job, store, command, STEPS[1][1] + "（CPU 回退）",
+                        extra_env={"ASR_DEVICE": "cpu"})
+        except CommandExecutionError as cpu_error:
+            raise RuntimeError(
+                f"字幕识别自动转 CPU 后仍未完成：{cpu_error}。"
+                "已有配音已保留；请检查运行环境或导出新的问题诊断包。"
+            ) from cpu_error
+        store.log(job, "CPU 字幕识别已完成，继续后续步骤；未重新生成配音。")
 
 
 def copy_artifacts(job: Job) -> dict[str, str]:
@@ -2386,6 +2426,10 @@ def render_semantic_visual_video(
             cloud_session_update_path.unlink(missing_ok=True)
             poster_env.update({
                 "USE_CLOUD_IMAGE_POOL": "1",
+                "CLOUD_IMAGE_POOL_METHOD": request.get("method", "running"),
+                "CLOUD_IMAGE_POOL_SIZE": request.get("size", "2560x1440"),
+                "CLOUD_IMAGE_POOL_RESOLUTION": request.get("image_resolution") or "1k",
+                "CLOUD_IMAGE_POOL_RATIO": "9:16" if request.get("video_orientation") == "portrait" else "16:9",
                 "CLOUD_IMAGE_POOL_BASE_URL": cloud_runtime["base_url"],
                 "CLOUD_IMAGE_POOL_ACCESS_TOKEN": cloud_runtime["access_token"],
                 "CLOUD_IMAGE_POOL_REFRESH_TOKEN": cloud_runtime["refresh_token"],
@@ -3282,6 +3326,16 @@ def _copy_visual_segment(
             item = {**item, "reference_image_paths": archived_paths}
             if item.get('scene_reference'):
                 item['scene_reference'] = {**item['scene_reference'], 'path': archived_paths[-1]}
+                scene_inputs = []
+                for value in item['scene_reference'].get('reference_image_paths', []):
+                    source = Path(value)
+                    target = reference_dir / (hashlib.sha256(str(source.resolve()).encode()).hexdigest()[:12] + source.suffix)
+                    if not source.is_file():
+                        raise ValueError('场景使用的参考素材缺失，无法归档')
+                    if source.resolve() != target.resolve():
+                        shutil.copy2(source, target)
+                    scene_inputs.append(str(target.resolve()))
+                item['scene_reference']['reference_image_paths'] = scene_inputs
         archived_mapping.append({
             **item,
             "macro_scene_id": output_macro_id,
@@ -3495,6 +3549,57 @@ def validate_step_audio_snapshot(job: Job, *, require_revision: bool = True) -> 
     return revision
 
 
+def _segment_archives_match(source: Path, target: Path) -> bool:
+    """Avoid replacing an unchanged TTS directory (often still open on Windows)."""
+    if not source.is_dir() or not target.is_dir():
+        return False
+    source_files = {path.relative_to(source): path for path in source.rglob("*") if path.is_file()}
+    target_files = {path.relative_to(target): path for path in target.rglob("*") if path.is_file()}
+    if not source_files or source_files.keys() != target_files.keys():
+        return False
+    for name, source_file in source_files.items():
+        target_file = target_files[name]
+        if source_file.stat().st_size != target_file.stat().st_size:
+            return False
+        with source_file.open("rb") as left, target_file.open("rb") as right:
+            while True:
+                left_chunk = left.read(1024 * 1024)
+                if left_chunk != right.read(1024 * 1024):
+                    return False
+                if not left_chunk:
+                    break
+    return True
+
+
+def _sync_segment_archive_files(source: Path, target: Path) -> None:
+    """Publish files without renaming a directory Windows readers may still hold.
+
+    Keep a rollback copy and publish the manifest last. The checkpoint revision
+    is written by the caller only after every file has been committed.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    backup = target.with_name(f".{target.name}.{uuid.uuid4().hex}.bak")
+    shutil.copytree(target, backup)
+    files = sorted((p for p in source.rglob("*") if p.is_file()),
+                   key=lambda p: (p.name == "manifest.json", str(p)))
+    published = []
+    try:
+        for path in files:
+            relative = path.relative_to(source)
+            _copy_file_atomic(path, target / relative)
+            published.append(relative)
+    except Exception:
+        for relative in reversed(published):
+            old = backup / relative
+            if old.is_file():
+                _copy_file_atomic(old, target / relative)
+            else:
+                (target / relative).unlink(missing_ok=True)
+        raise
+    finally:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
 def sync_refined_step_audio_assets(job: Job, project_dir: Path) -> dict[str, Any]:
     """Commit one coherent refined generation to output, workspace and job checkpoint."""
     revision = _step_audio_revision(project_dir)
@@ -3512,20 +3617,8 @@ def sync_refined_step_audio_assets(job: Job, project_dir: Path) -> dict[str, Any
         _copy_file_atomic(source, target)
     source_segments = project_dir / "other" / "tts_segments"
     target_segments = JOBS_DIR / job.id / "artifacts" / "tts_segments"
-    pending = target_segments.with_name(f".{target_segments.name}.{uuid.uuid4().hex}.tmp")
-    shutil.copytree(source_segments, pending)
-    backup = target_segments.with_name(f".{target_segments.name}.{uuid.uuid4().hex}.bak")
-    try:
-        if target_segments.exists():
-            os.replace(target_segments, backup)
-        os.replace(pending, target_segments)
-        shutil.rmtree(backup, ignore_errors=True)
-    except Exception:
-        if backup.exists() and not target_segments.exists():
-            os.replace(backup, target_segments)
-        raise
-    finally:
-        shutil.rmtree(pending, ignore_errors=True)
+    if not _segment_archives_match(source_segments, target_segments):
+        _sync_segment_archive_files(source_segments, target_segments)
     _write_json_atomic(JOBS_DIR / job.id / "artifacts" / STEP_AUDIO_REVISION_FILENAME, revision)
     job.request["_step_audio_revision"] = revision["fingerprint"]
     job.request["_step_audio_sentence_count"] = revision["sentence_count"]
@@ -4763,12 +4856,7 @@ def run_pipeline(job: Job, store: JobStore, *, resume: bool = False) -> None:
         store.update(job, step="scene", progress=32, message=STEPS[1][1])
         asr_python = resolve_asr_python()
         store.log(job, f"ASR Python: {asr_python}")
-        run_command(
-            job,
-            store,
-            [asr_python, "module2_scene_director.py"],
-            STEPS[1][1],
-        )
+        run_asr_stage(job, store, asr_python)
 
     if request.get("subtitle_only"):
         store.raise_if_cancelled(job)

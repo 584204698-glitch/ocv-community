@@ -22,7 +22,7 @@ from .video_text_policy import approved_visible_texts, visual_first_prompt_issue
 
 H3_SKILL_SOURCE = "MiniMax-AI/MiniMax-H3 h3-prompt-writing + OCV input-mode contract"
 H3_PROMPT_LANGUAGE = "zh-CN"
-H3_PROMPT_CONTRACT = 19
+H3_PROMPT_CONTRACT = 20
 
 
 class H3PromptValidationError(ValueError):
@@ -83,6 +83,12 @@ _CUT_TIME = re.compile(r"At (\d{2}):([0-5]\d)\.(\d{3})\b(?![.\d:])")
 _SYSTEM = r"""You are OCV H3 Prompt Agent. Your only job is to convert one already-approved,
 model-neutral video prompt into the selected MiniMax H3 input-mode format specified below.
 Do not redesign the storyboard, alter narration boundaries, add new facts, or change the core image.
+The model_neutral_video_prompt is the sole approved creative instruction, including manual edits.
+The attached image supplies visual reference, not permission to override explicit source instructions.
+Preserve explicitly specified clothing, props, actions, framing and camera movement. Do not infer
+extra props or actions from a character's identity. Do not restore older storyboard concepts.
+When image details conflict with explicit source instructions, describe the requested result;
+retain only compatible image details. Never invent split screens, time periods or extra characters.
 
 Follow the official h3-prompt-writing skill contract:
 The model_neutral_video_prompt is the sole creative brief. Image pixels, approved_visible_texts,
@@ -95,7 +101,8 @@ additional events or revive discarded storyboard actions.
    descriptions in Chinese; approved visible scene text keeps its original language. Never invent it.
 3. All actual images are attached, in reference_assets order. Inspect EVERY image's pixels before
    writing. Their tags, roles and subject mappings are authoritative. Never invent unattached pictures.
-4. Describe the approved action continuously within requested_duration_seconds (4-15 seconds).
+4. Describe the approved action continuously within requested_duration_seconds. Normally use 4-15
+   seconds; preserve a longer explicitly selected shot duration exactly, without padding its action.
    [Shot 1] has no timestamp. Unless allow_cuts is true, use exactly one continuous [Shot 1].
    Only approved later shots begin [Shot N] At MM:SS.mmm, with strictly increasing cut times
    greater than zero and less than the requested duration. Do not create a cut at the video's end.
@@ -142,6 +149,12 @@ additional events or revive discarded storyboard actions.
    extra voices. Do not invent replacement actions, delete an approved physical event, alter its timing,
    or remove requested non-verbal breathing/laughter. Keep legitimate approved visible scene text under
    rule 13. These are conversion instructions, not example phrases to copy into the generated prompt.
+   When reference_audio_requires_lipsync is true, the visible performer must instead open and close
+   the mouth naturally in precise sync with <Audio 1>. The no-generated-speech output policy does
+   not require closed lips. Supplied spoken_text is the exact original-language pronunciation script,
+   not visible text: never paraphrase it, add words or generate captions. In Ref2VA, place it only in
+   subject_definitions as the <Audio 1> script. In keyframe formats, refer to the supplied audio and
+   script without repeating the words inside the visual action prose. Generate no replacement voice.
 10. Preserve the lighting direction, shadow placement, exposure, contrast, and color temperature of
    <Picture 1> as closely as possible. Do not invent dramatic relighting, flicker, lens flares, or a
    day/night change unless the approved source explicitly requests it. A centered presenter, podium,
@@ -173,7 +186,7 @@ additional events or revive discarded storyboard actions.
    or the single camera movement already approved by the source prompt.
 16. Use concrete physical verbs, materials, directions, speeds, amplitudes and screen positions.
    Avoid empty adjectives such as cinematic, atmospheric, stunning, or dramatic. Aim for roughly
-   400-900 Chinese characters when the approved action has enough events, but never pad a short 4-15 second
+   400-900 Chinese characters when the approved action has enough events, but never pad a short
    shot or schedule more actions than can visibly finish.
 17. Make approved translation through space observable, not just a limb cycle. For running, walking,
    driving, flying or carrying something, specify an achievable start, direction and end relative to
@@ -639,7 +652,7 @@ def _append_subtitle_policy(prompt: str, detail_section: str) -> str:
                                       _ZH_SUBTITLE_POLICY if _uses_chinese_prose(prompt) else _SUBTITLE_POLICY)
 
 
-def prepare_h3_video_prompt(prompt: str, *, effects_only: bool = False) -> str:
+def prepare_h3_video_prompt(prompt: str, *, effects_only: bool = False, lipsync: bool = False) -> str:
     """Preserve authored audio unless effects-only H3 preparation is requested."""
     original = str(prompt or "").strip()
     prompt = original
@@ -661,11 +674,11 @@ def prepare_h3_video_prompt(prompt: str, *, effects_only: bool = False) -> str:
             _section_body(prompt, name) for name in ("summary", detail_section)
             if name in _section_bounds(prompt)
         ))
-        return _enforce_output_policy(prompt, detail_section)
+        return _enforce_output_policy(prompt, detail_section, lipsync=lipsync)
     return _append_subtitle_policy(prompt, detail_section)
 
 
-def _enforce_output_policy(prompt: str, detail_section: str) -> str:
+def _enforce_output_policy(prompt: str, detail_section: str, *, lipsync: bool = False) -> str:
     soundscape = _section_body(prompt, "overall_soundscape").strip()
     _assert_no_generated_audio(soundscape)
     # Official overall_soundscape N/A means complete silence.  Never replace it
@@ -675,8 +688,11 @@ def _enforce_output_policy(prompt: str, detail_section: str) -> str:
         prompt = prompt[:start] + "N/A\n\n" + prompt[end:]
     start, end = _section_bounds(prompt)["non_diegetic_music"]
     prompt = prompt[:start] + "N/A\n\n" + prompt[end:]
-    prompt = _append_description_policy(prompt, detail_section,
-                                       _ZH_EFFECTS_ONLY_POLICY if _uses_chinese_prose(prompt) else _EFFECTS_ONLY_POLICY)
+    policy = _ZH_EFFECTS_ONLY_POLICY if _uses_chinese_prose(prompt) else _EFFECTS_ONLY_POLICY
+    if lipsync and _uses_chinese_prose(prompt):
+        policy = policy.replace('角色用无声表情和肢体动作表达，不做连续说话口型。',
+                                '画面口型自然对齐已提供的 <Audio 1>，禁止生成替代人声不代表闭嘴表演。')
+    prompt = _append_description_policy(prompt, detail_section, policy)
     return _append_subtitle_policy(prompt, detail_section)
 
 
@@ -833,7 +849,7 @@ def _enforce_reference_audio(prompt: str, detail_section: str, *, reference_audi
 def _validate(
     prompt: str, duration: int, *, reference_audio: bool = False, lipsync: bool = False,
     input_mode: str = "single_first", image_assets: list[dict[str, str]] | None = None,
-    motion_plan: Any = None, allow_cuts: bool = False,
+    motion_plan: Any = None, allow_cuts: bool = False, spoken_text: str = '',
 ) -> str:
     if input_mode not in _FORMATS:
         raise ValueError(f"不支持的 H3 图片输入模式：{input_mode}")
@@ -885,7 +901,11 @@ def _validate(
     )
     _assert_no_generated_audio(authored_visual)
     prompt = _enforce_reference_audio(prompt, detail_section, reference_audio=reference_audio, lipsync=lipsync)
-    prompt = _enforce_output_policy(prompt, detail_section)
+    prompt = _enforce_output_policy(prompt, detail_section, lipsync=bool(reference_audio and lipsync))
+    if reference_audio and lipsync and spoken_text and input_mode == 'composition_reference':
+        if spoken_text not in _section_body(prompt, 'subject_definitions'):
+            prompt = _insert_in_section(prompt, 'subject_definitions',
+                '<Audio 1> exact spoken script (pronunciation only, never visible text):\n' + spoken_text)
     if input_mode != "composition_reference":
         prompt = _alignment(input_mode, duration, final_shot=final_shot) + "\n\n" + prompt
     issues = visual_first_prompt_issues(_section_body(prompt, detail_section), motion_plan)
@@ -911,6 +931,9 @@ def source_fingerprint(
         "core_image_digest": image_digest,
         "image_assets": image_assets or [],
         "confirmed_character_inputs": shot.get('_confirmed_character_inputs'),
+        "spoken_text": [row.get('text', '') for row in shot.get('source_subtitles', [])] if reference_audio else [],
+        "audio_digest": shot.get('reference_audio_digest', '') if reference_audio else '',
+        "audio_interval": [shot.get('start'), shot.get('duration')] if reference_audio else [],
         "skill": H3_SKILL_SOURCE,
         "prompt_language": H3_PROMPT_LANGUAGE,
         "contract": H3_PROMPT_CONTRACT,
@@ -926,8 +949,9 @@ def convert_for_h3(
 ) -> tuple[str, str]:
     """Return a validated mode-specific H3 prompt and its complete input fingerprint."""
     shot.pop('_h3_diagnostic_reused', None)
-    if isinstance(duration, bool) or not isinstance(duration, int) or not 4 <= duration <= 15:
-        raise ValueError("H3 仅接受 4～15 秒的整数镜头时长")
+    maximum = 30 if shot.get('generation_duration') == duration else 15
+    if isinstance(duration, bool) or not isinstance(duration, int) or not 4 <= duration <= maximum:
+        raise ValueError("H3 默认接受 4～15 秒整数镜长；明确选定的长镜头最多 30 秒")
     images, assets = _prepare_images(image_path, input_mode, last_image_path, reference_images)
     image_digest = assets[0]["sha256"]
     fingerprint = source_fingerprint(
@@ -937,9 +961,11 @@ def convert_for_h3(
     # Finalized video prose owns the creative brief. Old storyboard fields may
     # describe discarded actions after a replan and must not authorize cuts.
     allow_cuts = _cuts_requested(str(shot.get("video_prompt") or ""))
+    spoken_text = '\n'.join(str(row.get('text') or '') for row in shot.get('source_subtitles', [])) if reference_audio and lipsync else ''
     validation = {
         "reference_audio": reference_audio, "lipsync": lipsync, "input_mode": input_mode,
         "image_assets": assets, "motion_plan": shot.get("motion_plan"), "allow_cuts": allow_cuts,
+        "spoken_text": spoken_text,
     }
     cached = str(shot.get("h3_prompt") or "").strip()
     if cached and shot.get("h3_prompt_source") == fingerprint:
@@ -980,6 +1006,7 @@ def convert_for_h3(
         "reference_audio_supplied": reference_audio,
         "reference_audio_requires_lipsync": bool(reference_audio and lipsync),
         "core_storyboard_image_attached": True,
+        "spoken_text": spoken_text,
         "core_storyboard_image_sha256": image_digest,
         "attached_image_count": len(images),
         "reference_assets": assets + (

@@ -17,10 +17,6 @@ REQUIRED_FILES = (
     ".env.example",
     "runtime/python/python.exe",
     "runtime/node/node.exe",
-    "tools/IndexTTS25/indextts/infer_v2_5.py",
-    "tools/IndexTTS25/python_packages/tiktoken/__init__.py",
-    "tools/IndexTTS25/python_packages/whisper/__init__.py",
-    "tools/IndexTTS25/examples/voice_05.wav",
     "launcher/update-channel.json",
     "launcher/update-sources.json",
     "launcher/safe_update_helper.ps1",
@@ -31,9 +27,9 @@ REQUIRED_FILES = (
 )
 
 LOCAL_TTS_MODEL_FILES = (
-    "tools/IndexTTS25/checkpoints/gpt.pth",
-    "tools/IndexTTS25/checkpoints/codec.pth",
-    "tools/IndexTTS25/checkpoints/s2mel.pth",
+    "models/tts/indextts25/gpt.pth",
+    "models/tts/indextts25/codec.pth",
+    "models/tts/indextts25/s2mel.pth",
 )
 
 FORBIDDEN_PATHS = (
@@ -75,14 +71,19 @@ def main() -> int:
             errors.append(f"缺少必需文件：{relative}")
 
     if args.without_local_tts:
-        installed_model_files = [relative for relative in LOCAL_TTS_MODEL_FILES if (root / Path(relative)).is_file()]
+        installed_model_files = [relative for relative in (*LOCAL_TTS_MODEL_FILES, *(p.replace("models/tts/indextts25", "tools/IndexTTS25/checkpoints") for p in LOCAL_TTS_MODEL_FILES)) if (root / Path(relative)).is_file()]
         if installed_model_files:
             errors.append("轻便包仍含本地 TTS 大型权重：" + ", ".join(installed_model_files))
         else:
             notes.append("local_tts_model=optional/not bundled")
     else:
+        for relative in ("tts/python/python.exe", "tts/IndexTTS25/indextts/infer_v2_5.py",
+                         "tts/IndexTTS25/python_packages/tiktoken/__init__.py",
+                         "tts/IndexTTS25/examples/voice_05.wav"):
+            if not (root / relative).is_file():
+                errors.append(f"完整包缺少 TTS 运行组件：{relative}")
         for relative in LOCAL_TTS_MODEL_FILES:
-            if not (root / Path(relative)).is_file():
+            if not (root / Path(relative)).is_file() and not (root / relative.replace("models/tts/indextts25", "tools/IndexTTS25/checkpoints")).is_file():
                 errors.append(f"完整包缺少本地 TTS 权重：{relative}")
 
     for relative in FORBIDDEN_PATHS:

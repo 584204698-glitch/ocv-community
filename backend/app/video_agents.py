@@ -6,13 +6,14 @@ import hashlib
 import json
 import re
 from typing import Any, Callable
+from .presenter_mode import presenter_contract
 
-from .gemini_client import generate_gemini_text
+from .gemini_client import generate_gemini_text, parse_json_response
 from .video_director_contracts import (COMPOSITION_REFERENCE_GUIDE, FIRST_LAST_GUIDE,
                                      OPENING_FRAME_GUIDE, OBJECT_CONTINUITY_CONTRACT, REFERENCE_AVAILABILITY_CONTRACT,
                                      SEMANTIC_CONTRACT, SINGLE_REFERENCE_GUIDE,
                                      STORY_NARRATION_AUDIO_RULE,
-                                     SPEECH_ATTRIBUTION_CONTRACT, enforce_no_auto_subtitles,
+                                     SPEECH_ATTRIBUTION_CONTRACT, SPEECH_HANDOFF_CONTRACT, enforce_no_auto_subtitles,
                                      frame_text_contract, motion_contract, opening_frame_plan_issues,
                                      project_cast_contract, reference_guide, story_frame_contract, story_uses_opening_frame,
                                      video_input_contract, visual_contract)
@@ -22,9 +23,13 @@ from .video_director_examples import (CORE_DESIGN_EXAMPLE, MOTION_DESIGN_EXAMPLE
                                      VISUAL_FIRST_CORE_DESIGN_EXAMPLE, VISUAL_FIRST_MOTION_DESIGN_EXAMPLE)
 from .video_motion_plan import normalize_motion_plan, prompt_plan_issues, render_motion_action, restore_reference_draft
 from .video_text_policy import (VISUAL_FIRST, dynamic_text_mode, text_mode_contract,
-                                visual_first_plan_issues, visual_first_prompt_issues)
+                                visual_first_plan_issues, visual_first_prompt_issues,
+                                visual_first_long_text_issues, remove_unapproved_visible_text)
 from .video_image_prompt import assemble_image_body, without_leading_intent
 from .video_prompt_notices import prompt_notice_level
+from .video_medical_director import (is_medical, medical_contract, medical_design_issues, medical_example)
+from .video_speech import (inherit_attribution, reconcile_core_attribution,
+                           plan_owner_issues, prompt_owner_issues)
 
 
 Ask = Callable[[str, dict[str, Any]], dict[str, Any]]
@@ -237,12 +242,20 @@ narration_groups 是配音生产/编辑单元，作为强语义线索，但不�
     policy = pacing_policy(arrangement)
     if policy:
         system += PACING_CONTRACT
+    if is_medical(context):
+        system = system.replace('纯信息展示或运动没有表达增益时使用 static，不因一句短就为它单独建镜。开头两个镜头承担观众留存，必须规划为 video，\n并控制在15秒以内；可在字幕边界合理缩短分组。单条字幕自身超过15秒才允许受限为 static，不能私自拆句。',
+                                '纯信息展示或运动没有表达增益时使用 static，不因一句短就为它单独建镜。动态镜头控制在15秒以内，不能私自拆字幕句。')
+        system += medical_contract(context, 'groups')
+    max_duration = 30 if arrangement.get('dynamic_max_shot_duration') == 30 else 15
+    context = {**context, 'dynamic_max_shot_duration': max_duration}
+    system = system.replace('15秒', f'{max_duration}秒')
+    system += '\n时长上限不是目标时长；优先完整语义和合理节奏，不为用满上限延长镜头。'
     video_arrangement = {k:v for k,v in arrangement.items() if k not in {
         'visual_pacing_preset', 'visual_min_duration', 'visual_target_duration', 'visual_max_duration', 'visual_max_slides',
         'narration_groups'}}
     payload = {"story_context": context, "scenes": scenes,
                "narration_groups": arrangement.get('narration_groups', []),
-               "arrangement": {**video_arrangement, "opening_motion_shots": 2, "max_video_duration": 15}}
+               "arrangement": {**video_arrangement, "opening_motion_shots": 0 if is_medical(context) else 2, "max_video_duration": max_duration}}
     if policy:
         payload['visual_pacing'] = policy
     from .video_group_repair import repair_groups, validate_group_structure
@@ -288,9 +301,15 @@ narration_groups 是配音生产/编辑单元，作为强语义线索，但不�
 def design_core_images(context: dict[str, Any], scenes: list[dict[str, Any]], shots: list[dict[str, Any]],
                   references: list[dict[str, Any]], ask: Ask = ask_json) -> list[dict[str, Any]]:
     cast = _project_cast(context)
+    shots = [inherit_attribution(context, shot, scenes) for shot in shots]
+    for shot in shots:
+        # These are downstream products, not evidence for speaker identity.
+        for field in ('image_prompt', 'video_prompt', 'action', 'motion_plan'):
+            shot.pop(field, None)
     expected = [shot["id"] for shot in shots]
     system = """你是核心画面导演 Agent 2，只设计已分组镜头的核心画面与按需参考素材。
 不得改变镜头id、顺序、字幕分组或kind。不设计动态过程或视频提示词。
+若 user_intent 非空，这是用户主动编辑的本镜表达要求，应结合当前字幕优先落实，不得被历史画面或旧主题覆盖。
 通常保留intent；若 design_needs_review=true，说明用户调整了字幕归属：以新的source_subtitles为准，
 先重新理解本镜含义并返回新的intent和semantic，再设计核心画面。旧提示词与previous_designs仅供风格、
 人物与表达手段延续参考，不得把已移出的字幕内容继续塞入本镜；必须表达新移入的补充说明。
@@ -323,12 +342,28 @@ intent:"仅调整字幕范围或纠正错归属时填写",progression_plan:"仅�
         # The existing example intentionally combines later-stage material in
         # one reference, so it does not demonstrate a real opening frame.
         payload.pop('method_example')
+    system += medical_contract(context, 'core', include_common=False)
+    system += presenter_contract(context)
+    system += '\n严格输出一个 JSON 对象，顶层唯一字段为 "shots"，其值为对象数组；不得返回说明、方法示例或单个设计对象。数组必须包含以下全部镜头 id，且顺序一致：' + json.dumps(expected, ensure_ascii=False)
+    if is_medical(context):
+        payload['method_example'] = medical_example('core')
     response = ask(system, payload)
+    available_reference_ids = {item['id'] for item in references}
     for attempt in range(2):
         try:
             rows = _complete_rows(response, expected, "核心画面导演")
-            available = {item['id'] for item in references}
-            for row in rows:
+            for original, row in zip(shots, rows):
+                from .video_plan import validate_visual_candidates
+                design = row.get('visual_design', {})
+                if not isinstance(design, dict):
+                    raise ValueError(f"镜头 {row['id']}：visual_design 必须是对象")
+                validate_visual_candidates(design.get('candidates', []), row['id'])
+                presenter = context.get('video_direction', {}).get('presenter') or {}
+                if presenter:
+                    if any(type(design.get(flag)) is not bool for flag in ('presenter_visible', 'presenter_speaking')):
+                        raise ValueError(f"镜头 {row['id']}：请填写 presenter_visible 和 presenter_speaking 布尔值")
+                    if design['presenter_speaking'] and (not design['presenter_visible'] or presenter['reference_id'] not in row.get('reference_ids', [])):
+                        raise ValueError(f"镜头 {row['id']}：开口讲解必须可见且绑定指定讲解员参考图")
                 selected = row.get('reference_ids', [])
                 if not isinstance(selected, list) or any(not isinstance(value, str) for value in selected):
                     raise ValueError(f"镜头 {row['id']}：reference_ids 必须是已提供素材 id 的数组；没有参考素材时填 []")
@@ -342,16 +377,31 @@ intent:"仅调整字幕范围或纠正错归属时填写",progression_plan:"仅�
                     if len(selected) > limit:
                         raise ValueError(f"镜头 {row['id']}：开场参考素材超过本次 {limit} 张上限；不能裁掉原文人物或改写入场顺序")
                     row['cast_plan'] = bound
-                if any(value not in available for value in selected) or len(selected) > 8:
+                unknown = [value for value in selected if value not in available_reference_ids]
+                if unknown or len(selected) > 8:
                     raise ValueError(f"镜头 {row['id']}：参考素材选择无效。只能从本次 references 的 id 中选择最多8张；"
                                      + ('本任务没有上传参考素材，必须填 []。' if not references else
                                         '不可使用角色名、图号、示例或不存在的素材 id。'))
                 row['reference_ids'] = selected
+                from .reference_materials import explicit_reference_labels
+                by_label = {ref.get('label'): ref['id'] for ref in references if ref.get('label')}
+                omitted = [label for label in explicit_reference_labels(row.get('visual_description', ''))
+                           if label in by_label and by_label[label] not in selected]
+                if omitted:
+                    raise ValueError(f"镜头 {row['id']}：提示词引用了{'、'.join(sorted(omitted))}，但 reference_ids 未选择对应素材；请补齐绑定或移除不适用的引用")
+                medical_issues = medical_design_issues(context, row)
+                if medical_issues:
+                    raise ValueError(f"镜头 {row['id']}：" + '；'.join(medical_issues))
+                reconcile_core_attribution(original, row)
+                if dynamic_text_mode(context) == VISUAL_FIRST:
+                    issues = visual_first_long_text_issues(row.get('visual_description', ''))
+                    if issues and attempt == 0:
+                        raise ValueError(f"镜头 {row['id']}：" + '；'.join(issues))
             break
         except ValueError as exc:
             if attempt:
                 raise
-            response = ask(system + '\n只修复 validation_errors 中的格式、项目角色出场计划或参考素材选择问题；保持原文人物及入场顺序，不编造参考图或身份确认。没有项目绑定且没有可用素材时清空 reference_ids。必须返回对象 {shots:[...]}，镜头顺序和既定设计内容保持不变。',
+            response = ask(system + medical_contract(context, 'core', include_common=False) + SPEECH_HANDOFF_CONTRACT + '\n只修复 validation_errors 中的格式、项目角色出场计划或参考素材选择问题；保持原文人物及入场顺序，不编造参考图或身份确认。没有项目绑定且没有可用素材时清空 reference_ids。必须返回对象 {shots:[...]}，镜头顺序和既定设计内容保持不变。',
                            {**payload, 'previous_result': response, 'validation_errors': [str(exc)]})
     for row in rows:
         if not isinstance(row.get('visual_description'), str) or not row['visual_description'].strip():
@@ -406,6 +456,7 @@ semantic.speech_turns 用于核对谁说/想，不能把它打印成提示词的
         ).replace('核心图不是强制首帧，不改成动作前的空泛准备状态。',
                   '动态核心图是真实开场首帧；保留已开始的具体动作，不退回空泛准备状态。')
     system += story_frame_contract(context) + project_cast_contract(context)
+    system += SPEECH_HANDOFF_CONTRACT + medical_contract(context, 'image', include_common=False)
     payload = {"story_context": context, "global_style": style, "shots": shots, "references": references}
     by_id = {shot['id']: shot for shot in shots}
     def present(rows):
@@ -542,6 +593,9 @@ id及顺序保持不变，不输出多格数量、面板或额外镜头。
                                   if dynamic_text_mode(context) == VISUAL_FIRST else MOTION_DESIGN_EXAMPLE)}
     if story_uses_opening_frame(context):
         payload.pop('method_example')
+    system += medical_contract(context, 'motion', include_common=False) + presenter_contract(context)
+    if is_medical(context):
+        payload['method_example'] = medical_example('motion')
     for attempt in range(2):
         response = ask(system, payload)
         try:
@@ -566,6 +620,10 @@ id及顺序保持不变，不输出多格数量、面板或额外镜头。
                             raise ValueError(f"镜头 {row['id']} 的少字方案建议精简：" + '；'.join(text_issues))
                         row['text_policy_warnings'] = text_issues
                 issues = prompt_plan_issues(plan['reference_visual'], plan, 'image')
+                attribution_issues = plan_owner_issues(shot, plan)
+                if attribution_issues and attempt == 0:
+                    raise ValueError(f"镜头 {row['id']}：" + '；'.join(attribution_issues))
+                issues.extend(attribution_issues)
                 # This is a director's draft, not the submitted image prompt.
                 # The image finalizer receives the structured subjects/texts
                 # and resolves these omissions before the final prompt gate.
@@ -637,6 +695,7 @@ beat_prompts 必须按 beats 原顺序一一对应，不省略任何阶段，也
         system += story_frame_contract(context)
     system += project_cast_contract(context) + REFERENCE_AVAILABILITY_CONTRACT
     by_id = {shot['id']: shot for shot in prepared}
+    system += SPEECH_HANDOFF_CONTRACT + medical_contract(context, 'video', include_common=False) + presenter_contract(context)
     def present(rows):
         result = []
         for row in rows:
@@ -712,8 +771,24 @@ def _finalize_prompts(system, payload, shots, field, medium, expected, ask, asse
                 if not content:
                     problems.append(f"{shot['id']} 缺少实际画面内容，不能只有表达目的")
                     continue
+                if (attempt and medium == 'video'
+                        and dynamic_text_mode(payload.get('story_context') or {}) == VISUAL_FIRST):
+                    content = remove_unapproved_visible_text(content, shot.get('motion_plan'))
+                    row[field] = content
                 row[field + '_warnings'] = prompt_plan_issues(content, shot.get('motion_plan'), medium)
+                plan_attribution_notes = plan_owner_issues(shot, shot.get('motion_plan'))
+                row[field + '_warnings'].extend(plan_attribution_notes)
+                row[field + '_warnings'].extend(prompt_owner_issues(shot, content))
+                text_density_notes = []
                 if dynamic_text_mode(payload.get('story_context') or {}) == VISUAL_FIRST:
+                    plan = shot.get('motion_plan') or {}
+                    inspected = {**plan, 'beats': []} if medium == 'image' else plan
+                    text_density_notes = ['少字表达建议：' + issue for issue in
+                        visual_first_plan_issues(inspected) + visual_first_long_text_issues(content)]
+                    row[field + '_warnings'].extend(text_density_notes)
+                row[field + '_warnings'] = list(dict.fromkeys(row[field + '_warnings']))
+                if (dynamic_text_mode(payload.get('story_context') or {}) == VISUAL_FIRST
+                        or (is_medical(payload.get('story_context') or {}) and shot.get('kind') == 'video')):
                     # Unlike lexical handoff notices, this is an actionable
                     # policy violation: Agent 5 invented visible dialogue that
                     # the structured motion director never selected.
@@ -725,7 +800,8 @@ def _finalize_prompts(system, payload, shots, field, medium, expected, ask, asse
                 # for another paid finalizer call. Only actionable conflicts or
                 # missing selected display text get one bounded correction.
                 notes.extend(f"{shot['id']}：{issue}" for issue in row[field + '_warnings']
-                             if prompt_notice_level(issue) == 'warning')
+                             if prompt_notice_level(issue) == 'warning'
+                             and issue not in plan_attribution_notes and issue not in text_density_notes)
                 candidates.append(row)
             # Preserve usable candidates even when another shot or a later repair fails.
             # Warnings describe a literal comparison, not a reliable semantic verdict.
@@ -775,10 +851,8 @@ def audit_storyboard(shots: list[dict[str, Any]], reference_ids: set[str]) -> li
                 problems.append("动态镜头缺少视频提示词")
             elif not re.search(r"(?:参考)?图\s*1", video_prompt):
                 problems.append("视频提示词没有说明图1核心分镜参考")
-            if not 4 <= int(shot.get("generation_duration") or 0) <= 15:
-                problems.append("视频请求时长不在4～15秒")
-            if float(shot.get("duration") or 0) > 15:
-                problems.append("动态镜头可用时长超过15秒")
+            if int(shot.get("generation_duration") or 0) < max(4, float(shot.get("duration") or 0)):
+                problems.append("视频请求时长小于字幕跨度或最低4秒")
         elif shot.get("action") or shot.get("video_prompt"):
             problems.append("静态镜头残留动态指令")
         audited = dict(shot)

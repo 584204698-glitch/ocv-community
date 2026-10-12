@@ -1,4 +1,5 @@
 <script setup>
+import CloudImageQuality from './CloudImageQuality.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 
@@ -8,21 +9,22 @@ const message = ref('')
 const saving = ref(false)
 const editing = ref(false)
 function defaults(protocol='async_task') {
- const images=protocol==='openai_images'
+ const images=protocol==='openai_images',sync=protocol==='openai_sync'
  return {id:'',name:'',protocol,credential_source:'profile',base_url:'',model_id:'',
-  text_endpoint:images?'/images/generations':'/openapi/v2/{model}/text-to-image',
-  reference_endpoint:images?'/images/edits':'/openapi/v2/{model}/image-to-image',
-  query_endpoint:images?'':'/openapi/v2/query',resolutions:images?['1k']:['1k','2k','4k'],reference_images:true,api_key:''}
+  text_endpoint:images?'/images/generations':sync?'/v1/images/generations':'/openapi/v2/{model}/text-to-image',
+  reference_endpoint:images?'/images/edits':sync?'/v1/images/edits':'/openapi/v2/{model}/image-to-image',
+  query_endpoint:(images||sync)?'':'/openapi/v2/query',resolutions:images?['1k']:['1k','2k','4k'],reference_images:true,api_key:'',size:'auto',quality:'',response_format:'',timeout_seconds:600,request_parameters:{}}
 }
 const draft = reactive(defaults())
 const imagesProtocol = computed(() => draft.protocol==='openai_images')
 const sharedCredential = computed(() => imagesProtocol.value&&draft.credential_source==='language_custom')
 const canSave = computed(() => !saving.value&&Boolean(draft.name.trim()&&draft.model_id.trim()&&(sharedCredential.value||draft.base_url.trim())))
 const selected = computed(() => profiles.value.find(item => item.id === props.form.image_profile_id) || null)
+const extraParameters = ref('{}')
 const resolutions = computed(() => selected.value?.protocol==='openai_images'?['1k']:selected.value?.resolutions || ['1k','2k','4k'])
 
 function reset(profile=null){
- const protocol=profile?.protocol==='openai_images'?'openai_images':'async_task'
+ const protocol=['openai_images','openai_sync'].includes(profile?.protocol)?profile.protocol:'async_task'
  const next=defaults(protocol)
  if(profile){
   for(const key of ['id','name','base_url','model_id'])next[key]=String(profile[key]||'')
@@ -34,12 +36,14 @@ function reset(profile=null){
    next.resolutions=supported.length?[...supported]:next.resolutions
   }
  }
+ for(const key of ['size','quality','response_format','timeout_seconds','request_parameters'])if(profile?.[key]!==undefined)next[key]=profile[key]
+ extraParameters.value=JSON.stringify(next.request_parameters||{},null,2)
  Object.assign(draft,next);message.value='';editing.value=true
 }
 function changeProtocol(protocol){
- if(!['async_task','openai_images'].includes(protocol)||protocol===draft.protocol)return
+ if(!['async_task','openai_images','openai_sync'].includes(protocol)||protocol===draft.protocol)return
  const next=defaults(protocol),wasShared=sharedCredential.value
- for(const key of ['protocol','credential_source','text_endpoint','reference_endpoint','query_endpoint','resolutions','api_key'])draft[key]=next[key]
+ for(const key of ['protocol','credential_source','text_endpoint','reference_endpoint','query_endpoint','resolutions','api_key','size','quality','response_format','timeout_seconds','request_parameters'])draft[key]=next[key]
  if(wasShared)draft.base_url=''
 }
 function changeCredentialSource(source){
@@ -47,14 +51,17 @@ function changeCredentialSource(source){
  draft.credential_source=source;draft.api_key='';draft.base_url=''
 }
 async function load(){try{profiles.value=(await api.imageProfiles()).profiles||[];if(!profiles.value.some(x=>x.id===props.form.image_profile_id))props.form.image_profile_id=profiles.value.find(x=>x.configured)?.id||'';syncResolution()}catch(e){message.value=e.message}}
-function syncResolution(){if(!resolutions.value.includes(props.form.image_resolution))props.form.image_resolution=resolutions.value[0]||'1k'}
+function syncResolution(){if(props.form.use_cloud_image_pool)return;if(!resolutions.value.includes(props.form.image_resolution))props.form.image_resolution=resolutions.value[0]||'1k'}
 async function save(){
  if(!canSave.value)return
+ let parameters={}
+ try{if(draft.protocol==='openai_sync'){parameters=JSON.parse(extraParameters.value||'{}');if(!parameters||Array.isArray(parameters)||typeof parameters!=='object')throw new Error('额外参数须为 JSON 对象')}}catch(e){message.value=e.message;return}
  const paths=defaults(draft.protocol)
  const payload={...(draft.id?{id:draft.id}:{}),name:draft.name.trim(),protocol:draft.protocol,
   credential_source:sharedCredential.value?'language_custom':'profile',base_url:sharedCredential.value?'':draft.base_url.trim(),model_id:draft.model_id.trim(),
   text_endpoint:imagesProtocol.value?paths.text_endpoint:draft.text_endpoint.trim(),reference_endpoint:imagesProtocol.value?paths.reference_endpoint:draft.reference_endpoint.trim(),
   query_endpoint:imagesProtocol.value?'':draft.query_endpoint.trim(),resolutions:imagesProtocol.value?['1k']:[...draft.resolutions],reference_images:Boolean(draft.reference_images)}
+ if(draft.protocol==='openai_sync')Object.assign(payload,{size:draft.size,quality:draft.quality,response_format:draft.response_format,timeout_seconds:draft.timeout_seconds,request_parameters:parameters})
  if(!sharedCredential.value&&draft.api_key.trim())payload.api_key=draft.api_key.trim()
  saving.value=true;message.value=''
  try{const result=await api.saveImageProfile(payload);message.value=result.message;await load();props.form.image_profile_id=result.profile.id;syncResolution();draft.api_key='';editing.value=false}
@@ -67,17 +74,27 @@ onMounted(load)
 </script>
 
 <template>
- <section class="image-profile-selector" :class="{manager:manage,disabled:form.use_cloud_image_pool}">
+ <section class="image-profile-selector" :class="{manager:manage}">
   <div class="profile-head"><div><strong>{{manage?'图像模型配置':'本任务图像模型'}}</strong><small>{{form.use_cloud_image_pool?'号池模型由云端统一管理':manage?'每个图像模型单独保存，可选择接口协议和凭据来源。':'仅影响本任务；不会改动接口与服务中的配置。'}}</small></div><button v-if="manage&&!editing" type="button" @click="reset()">＋ 新增模型</button></div>
+  <div v-if="form.use_cloud_image_pool" class="profile-select-row"><label class="stack"><span>图片生成渠道</span><select v-model="form.method"><option value="running">稳定版</option><option value="ican">ICAN · GPT Image 2.5</option></select></label><CloudImageQuality :form="form" /></div>
   <template v-if="!form.use_cloud_image_pool">
    <div v-if="!manage||!editing" class="profile-select-row">
     <label><span>模型配置</span><select v-model="form.image_profile_id" aria-label="模型配置" :disabled="!profiles.length"><option value="">{{profiles.length?'请选择':'尚未配置'}}</option><option v-for="p in profiles" :key="p.id" :value="p.id" :disabled="!p.configured">{{p.name}} · {{p.model_id}}{{p.configured?'':'（请检查接口配置）'}}</option></select></label>
-    <label><span>出图分辨率</span><select v-model="form.image_resolution" aria-label="出图分辨率" :disabled="!selected"><option v-for="r in resolutions" :key="r" :value="r">{{r.toUpperCase()}}</option></select></label>
+    <label v-if="selected?.protocol==='openai_sync'"><span>同步接口出图尺寸</span><input :value="selected.size||'auto'" disabled /></label>
+    <label v-else><span>出图分辨率</span><select v-model="form.image_resolution" aria-label="出图分辨率" :disabled="!selected"><option v-for="r in resolutions" :key="r" :value="r">{{r.toUpperCase()}}</option></select></label>
    </div>
-   <div v-if="manage&&!editing" class="profile-list"><article v-for="p in profiles" :key="p.id"><div><b>{{p.name}}</b><small>{{p.model_id}} · {{p.protocol==='openai_images'?'Images 图片编辑':'异步任务接口'}} · {{p.protocol==='openai_images'&&p.credential_source==='language_custom'?'沿用自定义文字接口':(p.key_count||0)+' 个 Key'}}</small></div><button type="button" @click="reset(p)">编辑</button><button v-if="!p.legacy" type="button" @click="remove(p)">删除</button></article><div v-if="!profiles.length" class="profile-empty"><div class="profile-empty-title"><div><span>填写示范</span><b>Image 2.5 · 我的接口</b></div><em>仅为格式示例</em></div><dl><div><dt>API Base URL</dt><dd>https://api.example.com</dd></div><div><dt>模型 ID</dt><dd>image-2.5</dd></div><div><dt>API Key</dt><dd>填写服务商提供的密钥</dd></div><div><dt>支持分辨率</dt><dd>依所选接口协议而定</dd></div></dl><p>实际内容请以你的接口服务商文档为准。OCV 不指定或推荐第三方服务商。</p><button class="primary" type="button" @click="reset()">＋ 按格式新增配置</button></div></div>
+   <div v-if="manage&&!editing" class="profile-list"><article v-for="p in profiles" :key="p.id"><div><b>{{p.name}}</b><small>{{p.model_id}} · {{p.protocol==='openai_images'?'Images 图片编辑':p.protocol==='openai_sync'?'同步图像接口':'异步任务接口'}} · {{p.protocol==='openai_images'&&p.credential_source==='language_custom'?'沿用自定义文字接口':(p.key_count||0)+' 个 Key'}}</small></div><button type="button" @click="reset(p)">编辑</button><button v-if="!p.legacy" type="button" @click="remove(p)">删除</button></article><div v-if="!profiles.length" class="profile-empty"><div class="profile-empty-title"><div><span>填写示范</span><b>Image 2.5 · 我的接口</b></div><em>仅为格式示例</em></div><dl><div><dt>API Base URL</dt><dd>https://api.example.com</dd></div><div><dt>模型 ID</dt><dd>image-2.5</dd></div><div><dt>API Key</dt><dd>填写服务商提供的密钥</dd></div><div><dt>支持分辨率</dt><dd>依所选接口协议而定</dd></div></dl><p>实际内容请以你的接口服务商文档为准。OCV 不指定或推荐第三方服务商。</p><button class="primary" type="button" @click="reset()">＋ 按格式新增配置</button></div></div>
    <fieldset v-if="manage&&editing" class="profile-editor" :disabled="saving">
     <label><span>配置名称</span><input v-model="draft.name" maxlength="60" placeholder="例如：我的图片编辑接口" /></label>
-    <label><span>接口协议</span><select :value="draft.protocol" aria-label="接口协议" @change="changeProtocol($event.target.value)"><option value="async_task">异步任务接口</option><option value="openai_images">Images 图片编辑</option></select></label>
+    <label><span>接口协议</span><select :value="draft.protocol" aria-label="接口协议" @change="changeProtocol($event.target.value)"><option value="async_task">异步任务接口</option><option value="openai_images">Images 图片编辑</option><option value="openai_sync">OpenAI 兼容图像接口 · 同步返回</option></select></label>
+    <template v-if="draft.protocol==='openai_sync'">
+     <label><span>实际出图尺寸</span><input v-model="draft.size" placeholder="auto 或 1536x1024" /></label>
+     <label><span>质量参数（可留空）</span><input v-model="draft.quality" placeholder="以服务商文档为准" /></label>
+     <label><span>返回格式</span><select v-model="draft.response_format"><option value="">服务商默认</option><option value="b64_json">b64_json</option><option value="url">url</option></select></label>
+     <label><span>等待超时（秒）</span><input v-model.number="draft.timeout_seconds" type="number" min="30" max="1800" /></label>
+     <label class="wide"><span>额外请求参数（JSON，可选）</span><textarea v-model="extraParameters" rows="3" /></label>
+     <p class="wide credential-note">使用配置的 size，不将分辨率擅自转换。超时后不会自动重复收费重试。</p>
+    </template>
     <label v-if="imagesProtocol" class="wide"><span>凭据来源</span><select :value="draft.credential_source" aria-label="凭据来源" @change="changeCredentialSource($event.target.value)"><option value="profile">单独配置图像接口</option><option value="language_custom">沿用自定义文字接口</option></select></label>
     <p v-if="sharedCredential" class="wide credential-note">沿用当前自定义文字接口的地址和凭据，不复制密钥。文字接口更换地址后，请重新保存此图像配置。</p>
     <label v-else class="wide"><span>API Base URL</span><input v-model="draft.base_url" maxlength="2048" :placeholder="imagesProtocol?'https://api.example.com/v1':'https://api.example.com'" /></label>

@@ -192,7 +192,7 @@ class VideoImageRecoveryTest(unittest.TestCase):
         with patch.object(generation,'generate_for_user') as generate, \
              patch.object(export,'start_export_for_user') as render:
             for action in ('videos','export'):
-                with self.assertRaisesRegex(ValueError,'全部核心分镜图'):
+                with self.assertRaisesRegex(ValueError,'核心.*图'):
                     one_click.dispatch(action,{'id':1},result)
             generate.assert_not_called();render.assert_not_called()
         self.assertEqual(self.workers,[]);self.renderer.assert_not_called()
@@ -1012,9 +1012,9 @@ class VideoImageRecoveryTest(unittest.TestCase):
         write_audio(source / 'input' / '配音.wav', b'\x01\x00')
         job = SimpleNamespace(id='audio-fixture', user_id=1, request={'dynamic_video': True})
         store = SimpleNamespace(get=Mock(return_value=job))
-        editor = SimpleNamespace(output_dir=Mock(return_value=source))
+        editor = SimpleNamespace(output_dir=Mock(return_value=source), _project_dir=Mock(return_value=source))
         tts = ModuleType('backend.app.tts_editor')
-        tts.tts_editor = SimpleNamespace(status=Mock(return_value={'status': 'idle'}), commit_step_review=Mock())
+        tts.tts_editor = SimpleNamespace(status=Mock(return_value={'status': 'idle'}), commit_step_review=Mock(), _project_dir=Mock(return_value=source))
         with patch.object(sources, 'dependencies', return_value=(store, editor, None)), \
                 patch.dict(sys.modules, {'backend.app.tts_editor': tts}), \
                 patch.object(generation, '_start_local_worker') as video_worker, \

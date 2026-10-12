@@ -353,7 +353,8 @@ def save_inputs(identity: str, shot_id: str, data: VideoInputMutation, request: 
         if not same_inputs:
             shot['video_prompt_inputs_stale'] = True
         shot['video_input_selection'] = candidate['video_input_selection']
-        if not same_inputs:
+        same_structure = old_basis is not None and old_basis.get('input_mode') == new_basis.get('input_mode') and [row.get('role') for row in old_basis.get('images', [])] == [row.get('role') for row in new_basis.get('images', [])]
+        if not same_inputs and same_structure:
             adopt_prompt_basis(shot,new_basis,source='asset_replacement')
         if not pin_current:
             studio._invalidate_shot_video(record, shot, '本镜视频输入已修改')

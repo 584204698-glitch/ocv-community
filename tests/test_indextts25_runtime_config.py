@@ -64,9 +64,11 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertNotEqual(config.python, launcher.resolve())
         self.assertTrue(config.ready)
 
-    def test_uploaded_voice_without_demo_or_unused_qwen_model(self):
+    def test_uploaded_voice_without_demo_with_complete_model_package(self):
         self.assertFalse(self.config.available_voices())
-        self.assertFalse((self.config.model_dir / "qwen0.6bemo4-merge").exists())
+        # Package completeness is checked independently from the runner's
+        # use_qwen_emo=False inference setting; no bundled demo voice is needed.
+        self.assertTrue((self.config.model_dir / "qwen0.6bemo4-merge").exists())
         self.assertTrue(self.config.ready)
         voice = local.PROJECT_ROOT / "workspace/editor/user_1/uploads/mother.mp3"
         voice.parent.mkdir(parents=True)
