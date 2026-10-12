@@ -1,11 +1,16 @@
 """Start the source distribution with login and a persistent per-install secret."""
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import secrets
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+REVOKED_SESSION_FINGERPRINTS = {'458660ce3f8387c264a21200ebe59ec0df1e32e5b9f7f0a0837039396a567c16'}
+
+def revoked_secret(value):
+    return hashlib.sha256(value.encode('utf-8')).hexdigest() in REVOKED_SESSION_FINGERPRINTS
 
 def prepare_config(root=ROOT):
     target = root / '.env'
@@ -17,7 +22,8 @@ def prepare_config(root=ROOT):
     sys.path.insert(0, str(root))
     from backend.app.config import load_project_env
     load_project_env()
-    if not os.environ.get('SESSION_SECRET', '').strip():
+    configured_secret = os.environ.get('SESSION_SECRET', '').strip()
+    if not configured_secret or revoked_secret(configured_secret):
         path = root / '.session-secret'
         if path.is_symlink():
             raise RuntimeError('Session secret file must not be a symbolic link')
@@ -29,6 +35,16 @@ def prepare_config(root=ROOT):
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:
                 stream.write(secrets.token_hex(32))
         secret = path.read_text(encoding='utf-8').strip()
+        if revoked_secret(secret):
+            temporary = path.with_name('.session-secret.new-' + secrets.token_hex(8))
+            try:
+                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                secret = secrets.token_hex(32)
+                with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                    stream.write(secret)
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
         if len(secret) < 32:
             raise RuntimeError('Invalid session secret; inspect .session-secret without publishing its contents')
         os.environ['SESSION_SECRET'] = secret
