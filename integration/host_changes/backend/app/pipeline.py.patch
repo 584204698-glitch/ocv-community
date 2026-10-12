@@ -1,0 +1,29 @@
+--- a/backend/app/pipeline.py
++++ b/backend/app/pipeline.py
+@@ -1618,7 +1618,9 @@
+         if not executable or not Path(executable).is_file():
+             checked.append(value)
+             continue
+-        executable = str(Path(executable).resolve())
++        # A venv's Python may link to the base interpreter. Resolving that
++        # link drops the venv's dependencies and can merge distinct runtimes.
++        executable = str(Path(executable).absolute())
+         if executable in checked:
+             continue
+         checked.append(executable)
+@@ -4712,12 +4714,14 @@
+             tts_engine = "indextts25"
+             request["tts_engine"] = "indextts25"
+             store.log(job, "历史任务的 IndexTTS2 本地引擎已自动迁移为 IndexTTS-2.5")
+-        if tts_engine not in {"indextts25", "cluster", "qwen"}:
++        if tts_engine not in {"indextts25", "cluster", "qwen", "qwen3_local"}:
+             tts_engine = "indextts25"
+         if tts_engine == "cluster":
+             store.log(job, "模块 1：使用集群 GPU 加速配音，通过 cloud-api 提交、轮询并下载分块 WAV")
+         elif tts_engine == "qwen":
+             store.log(job, "模块 1：使用 Qwen-TTS 云端配音，逐句下载并合并本地 WAV")
++        elif tts_engine == "qwen3_local":
++            store.log(job, "模块 1：使用本地 Qwen3-TTS Base，复用已采用音色；本批次只加载一次模型")
+         elif tts_engine == "indextts25":
+             store.log(job, "模块 1：使用官方 IndexTTS-2.5 本地 GPU 配音")
+         else:

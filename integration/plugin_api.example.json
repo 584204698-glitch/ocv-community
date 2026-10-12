@@ -1,0 +1,12 @@
+{
+  "api_version": 1,
+  "capabilities": {
+    "tts_provider": false,
+    "project_assets": false,
+    "director_strategy": false,
+    "task_lifecycle": false,
+    "frontend_panels": false,
+    "export_tracks": false
+  },
+  "note": "Proposed declaration only. Implement and test the corresponding host APIs before setting true. This file does not enable any capability."
+}

@@ -1,0 +1,24 @@
+# OCV 社区增强
+
+## 当前安装效果
+
+本清单使用官方支持的 `placeholder` 类型：在插件面板登记、显示说明并支持启停，**不会加载附加源码**。原因是官方尚未开放相应执行接口。清单 permissions 为空，表示登记阶段没有申请任何任务或数据执行权限；正式接入时需按实际行为重新声明。
+
+附加模块集中在 `extension_src/backend/app` 和 `extension_src/frontend/src`，供作者对接。它们原来在宿主环境工作，包含宿主相对导入和路径约定；直接把它们当成独立包运行会缺依赖或定位到错误目录，不能这样安装。完整接入表在仓库 `integration/AUTHOR_GUIDE.md`。
+
+## 独立 Qwen 安装辅助
+
+请在有足够空间的独立目录准备模型，默认不下载、不安装、不推理：
+
+```powershell
+python tools/setup_qwen3.py --root "C:\OCV-Qwen"
+python tools/setup_qwen3.py --root "C:\OCV-Qwen" --install --download --cuda cu128
+```
+
+支持 Python 3.10–3.12，以 3.11 为已用环境；安装到独立 venv。显式下载约 9.1 GB 官方 Qwen 权重，固定版本并检查文件哈希。按驱动选择 cu128/cu130。安装结束不启动 GPU 推理，也不自动修改官方 OCV 的环境。
+
+独立 worker 源码在 `extension_src/backend/app/qwen3_runner.py`，由接入后的任务调度与 GPU 守锁调用。它使用官方 VoiceDesign 和 Base 模型；宿主的角色、项目、授权、输出管理及取消入口尚需作者提供。
+
+## 数据与更新
+
+项目、账号、密钥、声音和成片继续由官方宿主管理；不存进源码包。新安装器拒绝覆盖已有同名插件目录。当前没有跨版本自动升级与热卸载实现；不能在生成中直接删除模块，正式接口应先停止接收新任务、处理原有任务，再卸载。

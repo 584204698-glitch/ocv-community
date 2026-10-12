@@ -1,0 +1,108 @@
+--- a/module4_video_render.py
++++ b/module4_video_render.py
+@@ -910,6 +910,10 @@
+         (
+             str(config.get("api_key") or ""),
+             str(config.get("endpoint") or ""),
++            str(config.get("protocol") or "async_task"),
++            str(config.get("model") or ""),
++            str(config.get("base_url") or ""),
++            str(config.get("reference_endpoint") or ""),
+             str(config.get("ratio") or ""),
+             str(config.get("resolution") or ""),
+             str(config.get("method") or "running"),
+@@ -989,7 +993,11 @@
+         or "rhart-image-g-2"
+     )
+     base_config = {
+-        "protocol": os.getenv("OCV_IMAGE_PROTOCOL", "async_task"),
++        "protocol": (os.getenv("OCV_IMAGE_PROTOCOL", "async_task").strip()
++                     if os.getenv("OCV_IMAGE_PROFILE_ACTIVE", "").strip() == "1" else "async_task"),
++        "base_url": os.getenv("IMAGE_API_BASE_URL", "").strip(),
++        "reference_endpoint": os.getenv("RUNNINGHUB_IMAGE_TO_IMAGE_ENDPOINT", "").strip(),
++        "reference_images": os.getenv("OCV_IMAGE_REFERENCE_IMAGES", "1").strip() != "0",
+         "endpoint": os.getenv("RUNNINGHUB_ENDPOINT", "").strip()
+         or f"/{image_model.strip('/')}/text-to-image",
+         "model": image_model,
+@@ -3244,6 +3252,19 @@
+ def _submit_poster(macro: dict[str, Any], config: dict[str, str]) -> PosterTask:
+     poster_id = macro["macro_scene_id"]
+     output = _poster_output_path(macro)
++    if config.get('protocol') == 'openai_images':
++        from backend.app.openai_image_transport import render_openai_image
++        prepared = dict(macro)
++        if (not prepared.get('reference_image_paths') and prepared.get('reference_image_ids')
++                and not prepared.get('reference_binding_version')):
++            from backend.app.reference_materials import bind_material_references
++            prepared = bind_material_references([prepared], _reference_image_catalog())[0]
++        # The synchronous adapter owns exact-input reuse and uncertain outcomes.
++        # Its exceptions deliberately bypass the asynchronous account retry loop.
++        rendered = render_openai_image(prepared, config, output)
++        return PosterTask(macro=prepared, output=rendered, task_id=None)
++    if config.get('protocol', 'async_task') not in {'async_task', 'openai_sync'}:
++        raise ValueError('不支持的图像接口协议，请重新选择模型配置')
+     progress_label = str(macro.get("progress_label") or poster_id)
+     if output.is_file() and output.stat().st_size > 0:
+         print(f"复用已生成海报: {progress_label} -> {output.name}", flush=True)
+@@ -3252,8 +3273,13 @@
+     session = _new_session()
+     if config.get('protocol') == 'openai_sync':
+         from backend.app.openai_image_adapter import render
+-        render(macro, config, session, output)
+-        return PosterTask(macro=macro, output=output, task_id=None)
++        prepared = dict(macro)
++        if (not prepared.get('reference_image_paths') and prepared.get('reference_image_ids')
++                and not prepared.get('reference_binding_version')):
++            from backend.app.reference_materials import bind_material_references
++            prepared = bind_material_references([prepared], _reference_image_catalog())[0]
++        render(prepared, config, session, output)
++        return PosterTask(macro=prepared, output=output, task_id=None)
+     try:
+         task_id = _submit_poster_request(macro, config, session)
+     except requests.RequestException as exc:
+@@ -3621,6 +3647,7 @@
+         return []
+ 
+     uses_cloud_pool = any(config.get("cloud_pool") == "1" for config in provider_configs)
++    uses_native_images = any(config.get("protocol") in {"openai_images", "openai_sync"} for config in provider_configs)
+     active_workers = _poster_worker_count(provider_configs, len(mapping))
+     account_pool = RunningHubAccountPool(
+         provider_configs,
+@@ -3631,7 +3658,7 @@
+         for index, macro in enumerate(mapping, 1)
+     ]
+     if uses_cloud_pool:
+-        concurrency_label = f"云端全量入队 {active_workers}，并发由服务器调度"
++        concurrency_label = f"云端提交并发 {active_workers}，执行由服务器调度"
+     else:
+         mode = os.getenv("RUNNINGHUB_CONCURRENCY_MODE", "auto").strip().lower()
+         per_key = _positive_env_int("RUNNINGHUB_PER_KEY_CONCURRENCY", 1)
+@@ -3639,11 +3666,9 @@
+             f"本地{'自动' if mode != 'manual' else '手动'}并发 {active_workers}，"
+             f"单 Key 上限 {per_key}"
+         )
+-    print(
+-        f"提交 {len(mapping)} 张海报任务（{concurrency_label}，"
+-        f"{len(provider_configs)} 个账号可轮换，421/429 优先切账号后再入队）...",
+-        flush=True,
+-    )
++    submission_policy = ("兼容图片接口每镜只提交一次，失败保留原错误" if uses_native_images else
++                         f"{len(provider_configs)} 个账号可轮换，421/429 优先切账号后再入队")
++    print(f"提交 {len(mapping)} 张海报任务（{concurrency_label}，{submission_policy}）...", flush=True)
+     print(f"[POSTER_PROGRESS] 0/{len(mapping)}", flush=True)
+ 
+     completed: dict[int, Path] = {}
+@@ -3689,9 +3714,12 @@
+     if fatal_error is not None:
+         raise fatal_error
+     if failures:
+-        allow_neighbor_fallback = os.getenv(
++        allow_neighbor_fallback = not uses_native_images and os.getenv(
+             "RUNNINGHUB_ALLOW_NEIGHBOR_FALLBACK", "1"
+         ).strip().lower() not in {"0", "false", "no", "off"}
++        # Native receipts distinguish completed from rejected/unknown requests.
++        # Substituting a neighbor would overwrite that failed shot's provenance
++        # and present a different character/scene as a successful generation.
+         if completed and allow_neighbor_fallback:
+             successful_indices = tuple(completed)
+             for failed_index, error in sorted(failures.items()):

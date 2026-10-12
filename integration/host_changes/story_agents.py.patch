@@ -1,0 +1,133 @@
+--- a/story_agents.py
++++ b/story_agents.py
+@@ -13,6 +13,7 @@
+ from __future__ import annotations
+ 
+ import hashlib
++import copy
+ import json
+ import os
+ import re
+@@ -258,9 +259,10 @@
+     global_character_prompt: str = "",
+     world_prompt: str = "",
+     agent0_prompt_system: str = "",
++    project_cast: dict[str, Any] | None = None,
+ ) -> str:
+     """Agent 0 cache key.  It deliberately has no subtitle timing data."""
+-    payload = json.dumps({
++    basis = {
+         "content_mode": normalize_content_mode(content_mode),
+         "full_text": str(full_text or "").strip(),
+         "global_character_prompt": str(global_character_prompt or "").strip(),
+@@ -269,7 +271,11 @@
+             str(agent0_prompt_system or "").strip().encode("utf-8")
+         ).hexdigest(),
+         "version": STORY_CONTEXT_VERSION,
+-    }, ensure_ascii=False, separators=(",", ":"))
++    }
++    if project_cast is not None:
++        from backend.app.video_cast_planning import validate_planning_cast
++        basis['project_cast_sha256'] = validate_planning_cast(project_cast)['cast_sha256']
++    payload = json.dumps(basis, ensure_ascii=False, separators=(",", ":"))
+     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+ 
+ 
+@@ -475,18 +481,35 @@
+     agent0_prompt_system: str = "",
+     require_ai_success: bool = False,
+     director_strategy: str = DIRECTOR_STRATEGY_STABLE,
++    adopted_story: dict[str, Any] | None = None,
++    project_cast: dict[str, Any] | None = None,
+     speech_attribution: bool = False,
+ ) -> dict[str, Any]:
+     """Run Agent 0 once: full-text understanding without timing decisions."""
+     content_mode = normalize_content_mode(content_mode)
+     full_text = str(full_text or "").strip()
+     fallback = _fallback_story_context(full_text, content_mode, global_character_prompt, world_prompt)
++    cast_input = {}
++    if project_cast is not None:
++        from backend.app.video_cast_planning import validate_planning_cast
++        project_cast = validate_planning_cast(project_cast)
++        cast_input = {'project_cast': copy.deepcopy(project_cast)}
++        fallback['project_cast'] = copy.deepcopy(project_cast)
++    adopted_input = {}
++    if adopted_story is not None:
++        # The authenticated production boundary validates this frozen input.
++        # Keep original words, never convert a generated summary into authority.
++        if adopted_story.get('status') != 'current' or not isinstance(adopted_story.get('brief'), dict):
++            raise ValueError('采用故事的创作要求无效')
++        adopted_input = {'adopted_story': copy.deepcopy(adopted_story)}
++        fallback['story_handoff'] = copy.deepcopy(adopted_story)
+     fallback["source_fingerprint"] = story_context_fingerprint(
+         full_text,
+         content_mode,
+         global_character_prompt,
+         world_prompt,
+         agent0_prompt_system,
++        project_cast=project_cast,
+     )
+     if not gemini_configured():
+         if require_ai_success:
+@@ -510,6 +533,23 @@
+             "也不得根据姓名刻板印象改变性别。"
+         )
+         system_prompt += "\n\n" + AGENT0_DEVICE_INFORMATION_CONTRACT
++        if cast_input:
++            system_prompt += (
++                '\n【用户确认的项目角色资料】project_cast 是用户明确选择的项目角色与真实参考图绑定，'
++                '其 project_character_id、reference_id、constraints 必须原样理解，不能按同名或文件名猜测新的绑定。'
++                '本次只整理全文语义资料；你输出的 characters 是语义角色描述，不得改写或重建 project_cast，'
++                '不将自己的 character_id 当作项目角色 ID，不因为角色库有某人就让其每镜出场。'
++                '明确外形、服装及身体结构约束必须保留；语义描述不证明某人物出现在图片里，也不声称已锁定生成结果。'
++                '同名角色无法区分时保留歧义，不随意选一个项目角色。现有身份参考已由用户选择；'
++                '采用时“尚未提供图片”等状态描述不能否认本次实际绑定，明确造型约束的冲突仍须保留待核对。'
++            )
++        if adopted_input:
++            system_prompt += (
++                '\n【采用故事的制作要求】adopted_story.story 是已采用原稿；adopted_story.brief 是采用时冻结的用户要求。'
++                '完整保留明确的角色外形、服装、身体结构、关系、场景和结局限制，不能为了方便动作而改写。'
++                'brief 中的题材/创作愿望不自动变成已发生剧情；只依据正文建立事件顺序。'
++                '正文与要求若冲突，明确保留冲突供后续核对，不擅自修正文稿。不要从摘要或素材文件名推断角色身份。'
++            )
+         if speech_attribution:
+             from backend.app.video_speech import AGENT0_SPEECH_CONTRACT
+             system_prompt += "\n\n" + AGENT0_SPEECH_CONTRACT
+@@ -528,6 +568,8 @@
+                 "complete_text": full_text,
+                 "user_global_character_bible": global_character_prompt,
+                 "user_world_bible": world_prompt,
++                **adopted_input,
++                **cast_input,
+             }, ensure_ascii=False),
+             temperature=0.15,
+             response_mime_type="application/json",
+@@ -551,6 +593,9 @@
+                     user_prompt=json.dumps({
+                         "complete_text": full_text,
+                         "user_global_character_bible": global_character_prompt,
++                        "user_world_bible": world_prompt,
++                        **adopted_input,
++                        **cast_input,
+                         "previous_output": raw_context,
+                         "validation_errors": issues,
+                     }, ensure_ascii=False),
+@@ -581,12 +626,18 @@
+                 from backend.app.video_speech import normalize_attribution
+                 context['speech_attribution'] = normalize_attribution(raw_context.get('speech_attribution'), full_text)
+             context["generation_source"] = "gemini"
++            if adopted_input:
++                context['story_handoff'] = copy.deepcopy(adopted_story)
++            if cast_input:
++                # Model-created character cards cannot replace or add bindings.
++                context['project_cast'] = copy.deepcopy(project_cast)
+             context["source_fingerprint"] = story_context_fingerprint(
+                 full_text,
+                 content_mode,
+                 global_character_prompt,
+                 world_prompt,
+                 agent0_prompt_system,
++                project_cast=project_cast,
+             )
+             return context
+     except (GeminiError, ValueError, TypeError, json.JSONDecodeError) as exc:

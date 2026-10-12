@@ -1,0 +1,213 @@
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -21,9 +21,11 @@
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import FileResponse, StreamingResponse
+ from fastapi.staticfiles import StaticFiles
+-from pydantic import BaseModel, EmailStr, Field, field_validator
++from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+ 
+ from .auth import COOKIE_NAME, current_user_from_request, local_auth_enabled, local_user, require_user, sign_session
++from .story_workspace import StorySource, resolve_story_source, router as story_workspace_router
++from .video_cast_planning import CreationCastBinding, creation_cast_bindings
+ from .config import _parse_env_lines, save_project_env_values
+ from .cloud_client import CloudApiError, cloud_client_for, load_cloud_config
+ from .cloud_tts import build_quote_payload
+@@ -150,7 +152,10 @@
+     volume_db: float = Field(default=-10, ge=-60, le=6)
+ 
+ 
+-class GenerateRequest(BaseModel):
++from .video_render_options import VideoRenderOptions
++
++
++class GenerateRequest(VideoRenderOptions):
+     @field_validator("tts_voice_id", mode="before")
+     @classmethod
+     def migrate_null_local_voice(cls, value):
+@@ -160,6 +165,7 @@
+ 
+     project_name: str = Field(default="", max_length=80)
+     script: str = ""
++    story_source: StorySource | None = None
+     module1_only: bool = False
+     subtitle_only: bool = False
+     subtitle_use_correction: bool = True
+@@ -178,7 +184,7 @@
+     tts_parallelism: int = Field(default=1, ge=1, le=3)
+     # ``indextts2`` remains accepted only to migrate historical presets and
+     # archived requests. New local work always runs IndexTTS-2.5.
+-    tts_engine: Literal["indextts2", "indextts25", "cluster", "qwen"] = "indextts25"
++    tts_engine: Literal["indextts2", "indextts25", "cluster", "qwen", "qwen3_local"] = "indextts25"
+     tts_emotion: str | None = Field(default=None, max_length=30)
+     tts_emotion_weight: float = Field(default=0.65, ge=0, le=1)
+     tts_english_normalization: bool = False
+@@ -234,10 +240,19 @@
+     reference_image_notes: dict[str, str] = Field(default_factory=dict, max_length=6)
+     reference_image_labels: dict[str, str] = Field(default_factory=dict, max_length=6)
+     reference_image_kinds: dict[str, str] = Field(default_factory=dict, max_length=6)
++    project_cast_bindings: list[CreationCastBinding] = Field(default_factory=list, max_length=6)
++    auto_character_design: bool = True
+     story_environment_prompt: str | None = Field(default=None, max_length=2000)
+     visual_prompt_system: str | None = Field(default=None, max_length=4000)
+     agent0_prompt_system: str | None = Field(default=None, max_length=12000)
+     agent1_prompt_system: str | None = Field(default=None, max_length=12000)
++
++    @model_validator(mode='after')
++    def validate_project_cast_bindings(self):
++        if self.project_cast_bindings and not self.dynamic_video:
++            raise ValueError('固定角色绑定仅用于动态视频制作')
++        creation_cast_bindings([row.model_dump() for row in self.project_cast_bindings], self.reference_image_ids)
++        return self
+ 
+ 
+ class ParameterPresetRequest(BaseModel):
+@@ -481,8 +496,11 @@
+ 
+ 
+ app = FastAPI(title="Voice Over Video API")
++app.include_router(story_workspace_router)
+ from .image_studio import router as image_studio_router
+ app.include_router(image_studio_router)
++from .voice_design import router as voice_design_router
++app.include_router(voice_design_router)
+ from .comfyui_bridge import router as comfyui_bridge_router
+ app.include_router(comfyui_bridge_router)
+ from .managed_comfyui import router as managed_comfyui_router
+@@ -496,6 +514,8 @@
+ from .video_export import reconcile_completed_projects, router as video_export_router
+ app.include_router(video_model_config_router)
+ app.include_router(video_generation_router)
++from .video_inputs import router as video_inputs_router
++app.include_router(video_inputs_router)
+ app.include_router(video_export_router)
+ from .image_profiles import router as image_profiles_router
+ app.include_router(image_profiles_router)
+@@ -522,6 +542,16 @@
+     app.mount("/workspace", StaticFiles(directory=str(WORKSPACE_DIR)), name="workspace")
+ 
+ 
++from .one_click import router as one_click_router
++app.include_router(one_click_router)
++
++
++@app.on_event("shutdown")
++def stop_one_click() -> None:
++    from .one_click import stop
++    stop()
++
++
+ @app.on_event("startup")
+ def startup() -> None:
+     init_database()
+@@ -533,6 +563,8 @@
+         edit_store.load_persisted()
+         store.import_legacy_jobs(sole_user_id())
+         reconcile_completed_projects()
++        from .one_click import start
++        start()
+ 
+ 
+ def list_files(patterns: list[str]) -> list[dict[str, str]]:
+@@ -1598,6 +1630,16 @@
+                         )
+             except (CloudApiError, ValueError) as exc:
+                 add("tts", "集群 GPU", "error", str(exc))
++    elif str(data.get("tts_engine") or "indextts25") == "qwen3_local":
++        from .qwen3_local import health as qwen3_health, resolve_saved_voice
++        if not qwen3_health()['ready']:
++            add("tts", "Qwen3-TTS 本地", "error", "音色设计与克隆模型尚未安装完整")
++        else:
++            try:
++                resolve_saved_voice(data.get("tts_voice_id"), int(user["id"]))
++                add("tts", "Qwen3-TTS 本地", "passed", "已保存音色可用；由工作站复用固定声音生成配音")
++            except (ValueError, HTTPException) as exc:
++                add("tts", "Qwen3-TTS 本地", "error", str(getattr(exc, 'detail', exc)))
+     elif str(data.get("tts_engine") or "indextts25") == "qwen":
+         if _api_key_status()["qwen_tts"]["configured"]:
+             add("tts", "Qwen-TTS", "passed", "DashScope API Key 已配置；实际额度将在合成时由服务端确认")
+@@ -1635,16 +1677,16 @@
+         language_required = True
+         image_required = str(data.get("visual_backend") or "poster").lower() in {"poster", "online-poster", "runninghub"}
+         use_cloud_pool = bool(data.get("use_cloud_image_pool"))
++        image_profile = data.get("image_profile_snapshot")
+         with ThreadPoolExecutor(max_workers=2) as executor:
+             language_future = (
+                 None if use_cloud_pool
+                 else executor.submit(_probe_language_api, values) if language_required else None
+             )
+-            image_keys = _runninghub_api_keys(values)
+             image_future = (
+-                None
+-                if image_required and use_cloud_pool
+-                else executor.submit(_probe_image_api_pool, image_keys) if image_required else None
++                executor.submit(_probe_image_api_pool, _runninghub_api_keys(values))
++                if image_required and not use_cloud_pool and not image_profile
++                else None
+             )
+             if language_future:
+                 status, message = language_future.result()
+@@ -1652,6 +1694,15 @@
+             if image_future:
+                 status, message = image_future.result()
+                 add("image_api", "图像模型 API", status, message)
++            elif image_required and image_profile and not use_cloud_pool:
++                # profile_snapshot already validated this profile's current
++                # credentials, protocol and resolution. The legacy probe uses
++                # different credentials/endpoints and cannot validate it.
++                add(
++                    "image_api", "图像模型 API", "passed",
++                    f"{image_profile['name']} 的配置与 {image_profile['resolution'].upper()} 分辨率校验通过；"
++                    "未进行联网验证，实际可用性将在生成时确认",
++                )
+             elif image_required and use_cloud_pool:
+                 client = cloud_client_for(int(user["id"]))
+                 state = client.session_snapshot()
+@@ -2305,6 +2356,8 @@
+             ),
+         )
+     data["project_name"] = normalize_project_name(data.get("project_name"))
++    if data.get("story_source"):
++        data["story_snapshot"] = resolve_story_source(int(user["id"]), data["story_source"], data.get("script", ""))
+     if not data.get("use_cloud_image_pool") and str(data.get("image_profile_id") or "").strip():
+         from .image_profiles import profile_snapshot
+         try:
+@@ -2390,6 +2443,14 @@
+         raise HTTPException(status_code=400, detail="Qwen-TTS 尚未配置 API Key，请先在语音参数中保存 DASHSCOPE_API_KEY")
+     elif data.get("tts_engine") == "qwen" and str(data.get("qwen_tts_instructions") or "").strip() and not voice_supports_instructions(str(data.get("qwen_tts_voice") or "")):
+         raise HTTPException(status_code=400, detail="所选 Qwen 系统音色仅支持基础合成；请清空配音描述，或改选支持配音描述的音色")
++    elif data.get("tts_engine") == "qwen3_local":
++        from .qwen3_local import health as qwen3_health, resolve_saved_voice
++        if not qwen3_health()['ready']:
++            raise HTTPException(503, "本地 Qwen3-TTS 尚未安装完整")
++        try:
++            resolve_saved_voice(data.get("tts_voice_id"), int(user["id"]))
++        except ValueError as exc:
++            raise HTTPException(400, str(exc)) from exc
+     elif data.get("tts_engine") == "indextts25":
+         config = load_indextts25_config()
+         if not config.ready:
+@@ -2423,7 +2484,13 @@
+             raise HTTPException(status_code=400, detail=str(exc)) from exc
+     elif data.get("skip_text_correction"):
+         raise HTTPException(status_code=400, detail="只有使用已有配音时才能跳过字幕校对")
++    managed_dynamic = bool(data.get("dynamic_video") and data.get("dynamic_auto_advance"))
++    if managed_dynamic:
++        data["dynamic_execution_owner"] = "server"
+     job = store.create(data, user_id=int(user["id"]))
++    if managed_dynamic:
++        from .one_click import register
++        register(job)
+     if data.get("step_mode"):
+         initialize_step_workflow(job)
+     store.run_async(job)
+@@ -2847,7 +2914,8 @@
+     output_root = OUTPUT_DIR.resolve()
+     project_dir: Path | None = None
+     if bool(job.request.get('dynamic_video')) and str(job.request.get('_dynamic_video_project_id') or ''):
+-        candidate = step_workflow_output_dir(job)
++        archive = str(job.request.get('_dynamic_video_output_dir') or '').strip()
++        candidate = (output_root / Path(archive).name).resolve() if archive else step_workflow_output_dir(job)
+         if candidate is not None and candidate.is_dir():
+             project_dir = candidate
+     for asset in list_media_assets(user_id=int(user["id"]), generation_job_id=job_id):

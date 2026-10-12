@@ -1,0 +1,204 @@
+--- a/backend/app/video_plan.py
++++ b/backend/app/video_plan.py
+@@ -7,14 +7,16 @@
+ import uuid
+ 
+ from .video_motion_plan import normalize_motion_plan
+-from .video_director_contracts import VIDEO_DIRECTOR_REVISION
++from .video_director_contracts import VIDEO_DIRECTOR_REVISION, story_uses_opening_frame
+ from .video_text_policy import normalize_text_mode
+ from .video_prompt_notices import has_prompt_warning
++from .story_production import production_story_handoff
++from .video_cast_planning import normalize_cast_plan, validate_cast_plan, validate_planning_cast
+ from .video_speech import normalize_turns
+ from .video_medical_director import MEDICAL_DESIGN_FIELDS, is_medical, medical_contract
+ 
+ 
+-_DRAFT_FIELDS = ('id', 'slide_ids', 'kind', 'intent', 'action', 'image_prompt', 'video_prompt', 'visual_description')
++_DRAFT_FIELDS = ('id', 'slide_ids', 'kind', 'intent', 'action', 'image_prompt', 'video_prompt', 'visual_description', 'native_dialogue', 'continuity_props', 'continuity_states')
+ 
+ 
+ def design_snapshot(shot):
+@@ -98,6 +100,18 @@
+         clean['design_review_confirmed'] = bool(row.get('design_review_confirmed', False)) and not clean['design_needs_review']
+         clean['reference_audio_enabled'] = bool(row.get('reference_audio_enabled', True))
+         clean['reference_audio_lipsync'] = bool(row.get('reference_audio_lipsync', True))
++        if row.get('native_dialogue') is not None:
++            from .h3_dialogue import validate_dialogue_draft
++            clean['native_dialogue'] = validate_dialogue_draft(row['native_dialogue'])
++            clean['native_staging_stale'] = bool(row.get('native_staging_stale'))
++            if kind != 'video' or clean['native_dialogue']['duration'] != clean['generation_duration']:
++                raise ValueError('原生对白计划与镜头时长不一致，请按对白重新规划，不能转成静态图')
++            if row.get('continuity_props'):
++                from .video_prop_continuity import normalize_bindings
++                clean['continuity_props'] = normalize_bindings(row['continuity_props'])
++            if row.get('continuity_states'):
++                from .video_prop_states import normalize
++                clean['continuity_states'] = normalize(row['continuity_states'])
+         history = row.get('previous_designs', [])
+         if not isinstance(history, list) or any(not isinstance(item, dict) for item in history):
+             raise ValueError('旧设计资料无效')
+@@ -152,6 +166,8 @@
+         if 'speech_turns' in row.get('semantic', {}):
+             clean['semantic']['speech_turns'] = _normalize_speech_turns(
+                 row['semantic']['speech_turns'], ''.join(by_id[identity]['text'] for identity in ids))
++        if 'cast_plan' in row:
++            clean['cast_plan'] = normalize_cast_plan(row['cast_plan'])
+         if row.get('semantic', {}).get('speech_mode') in ('none', 'dialogue', 'mixed', 'uncertain'):
+             clean['semantic']['speech_mode'] = row['semantic']['speech_mode']
+         # Derive from authoritative subtitles; never trust stale/client-provided text.
+@@ -173,6 +189,7 @@
+     rows = copy.deepcopy(shots)
+     def invalidate_phase_design(row):
+         row.pop('motion_plan', None)
++        row.pop('cast_plan', None)
+         row['design_needs_review'] = True
+         row['design_review_confirmed'] = False
+         row.pop('duration_repair', None)
+@@ -264,10 +281,16 @@
+ def plan_storyboard(scenes, style, characters, world, references, progress, parameters=None, checkpoint=None,
+                     *, resume_state=None, save_state=None, fixed_shots=None, repair_only=False):
+     parameters = parameters or {}
++    cast = parameters.get('project_cast')
++    if cast is not None:
++        cast = validate_planning_cast(cast)
++        parameters = {**parameters, 'project_cast': cast}
++    snapshot = parameters.get('story_snapshot')
++    handoff = production_story_handoff(snapshot, scenes) if snapshot is not None else None
+     from .presenter_mode import presenter_config
+     if parameters.get('presenter_mode') and not presenter_config(parameters, references):
+         raise ValueError('讲解员模式已开启，请先选择有效的人物参考图')
+-    from story_agents import AGENT0_SYSTEM_PROMPT, create_story_context
++    from story_agents import create_story_context
+     from .video_agents import (audit_storyboard, design_core_images, direct_motion, plan_groups,
+                                write_image_prompts, write_video_prompts)
+     fingerprint = planning_fingerprint(scenes, style, characters, world, references, parameters)
+@@ -275,7 +298,18 @@
+         resume_state.get('fingerprint') == fingerprint) else {'fingerprint': fingerprint}
+     recover_final_gate = str(state.get('stage') or '').startswith('最终校验待修订')
+     if fixed_shots and not state.get('shots'):
+-        state['shots'] = normalize_shots(fixed_shots, scenes, [r['id'] for r in references])
++        fixed = copy.deepcopy(fixed_shots)
++        for shot in fixed:
++            if cast is not None:
++                try:
++                    validate_cast_plan(cast, shot.get('cast_plan'))
++                except ValueError:
++                    shot.pop('cast_plan', None)
++                    shot['design_needs_review'] = True
++            elif 'cast_plan' in shot:
++                shot.pop('cast_plan')
++                shot['design_needs_review'] = True
++        state['shots'] = normalize_shots(fixed, scenes, [r['id'] for r in references])
+         retained = [row['id'] for row in state['shots'] if not row.get('design_needs_review')]
+         state['completed'] = {phase: retained[:] if repair_only else []
+                               for phase in ('core', 'motion', 'image', 'video')}
+@@ -290,13 +324,28 @@
+     else:
+         progress('Agent 0：通读全文与整理人物资料')
+         medical_context = {'video_direction': {'dynamic_text_mode': normalize_text_mode(parameters.get('dynamic_text_mode'))}}
+-        agent0_options = ({'agent0_prompt_system': AGENT0_SYSTEM_PROMPT + medical_contract(medical_context, 'context')}
+-                          if is_medical(medical_context) else {})
+-        context = create_story_context('\n'.join(s['text'] for s in scenes),
++        agent0_options = {}
++        if is_medical(medical_context):
++            from story_agents import AGENT0_SYSTEM_PROMPT
++            agent0_options['agent0_prompt_system'] = AGENT0_SYSTEM_PROMPT + medical_contract(medical_context, 'context')
++        adopted = handoff if handoff and handoff['status'] == 'current' else None
++        adoption_arguments = {'adopted_story': adopted} if adopted else {}
++        if cast is not None:
++            adoption_arguments['project_cast'] = cast
++        context = create_story_context(adopted['story'] if adopted else '\n'.join(s['text'] for s in scenes),
+                                        content_mode=parameters.get('content_mode', 'general'),
+                                        global_character_prompt=characters, world_prompt=world, require_ai_success=True,
+-                                       director_strategy=parameters.get('director_strategy', 'stable'), speech_attribution=True,
+-                                       **agent0_options)
++                                       director_strategy=parameters.get('director_strategy', 'stable'),
++                                       speech_attribution=True, **agent0_options, **adoption_arguments)
++    if handoff:
++        context['story_handoff'] = copy.deepcopy(handoff)
++    else:
++        context.pop('story_handoff', None)
++    if cast is not None:
++        context['project_cast'] = copy.deepcopy(cast)
++    else:
++        context.pop('project_cast', None)
++    context['production_fingerprint'] = fingerprint
+     context['dynamic_max_shot_duration'] = 30 if parameters.get('dynamic_max_shot_duration') == 30 else 15
+     context['video_direction'] = {
+         'director_revision': VIDEO_DIRECTOR_REVISION,
+@@ -304,8 +353,11 @@
+         'dynamic_text_mode': normalize_text_mode(parameters.get('dynamic_text_mode')),
+         'user_characters': characters, 'user_world': world, 'visual_style': style,
+         'reference_materials': references,
++        'max_core_character_references': 3 if parameters.get('scene_references_enabled', True) else 4,
+         'core_image_role': '单张核心图以前段场面为主，可容纳有归属的复合素材；视频按原文依次展开，不需照搬首帧',
+     }
++    if story_uses_opening_frame(context):
++        context['video_direction']['core_image_role'] = '真实开场首帧；只画此时可见的主体，后入场角色通过独立身份参考或尾帧衔接'
+     from .presenter_mode import presenter_config
+     context['video_direction']['presenter'] = presenter_config(parameters, references)
+     state['context'] = context
+@@ -331,8 +383,12 @@
+             persist_state('提示词定稿已恢复')
+             progress('已复核并恢复保存的完整提示词；标题排版差异不再阻断，无需重新调用 Agent。')
+             return context, recovered
++    from .video_pacing import PACING_FIELDS, pacing_policy
+     arrangement = {key: parameters[key] for key in (
+-        'director_strategy', 'video_orientation', 'dynamic_max_shot_duration') if key in parameters}
++        'director_strategy', 'video_orientation', 'dynamic_max_shot_duration', *PACING_FIELDS) if key in parameters}
++    policy = pacing_policy(arrangement)
++    if policy:
++        progress(f'镜头节奏：目标 {policy["target_duration"]:g} 秒，多句镜头最长 {policy["max_duration"]:g} 秒；按字幕边界自然切换。')
+     arrangement['narration_groups'] = parameters.get('_narration_groups', [])
+     if arrangement['narration_groups']:
+         progress(f'已读取 {len(arrangement["narration_groups"])} 段配音作为语义参考，不强制按配音段切镜；画面按全文语义划分，时长以字幕时间轴为准。')
+@@ -348,6 +404,11 @@
+                               on_draft=preserve_groups, resume_rows=state.get('groups'), boundary_review=True)
+         for shot in planned:
+             shot['planning_kind'] = shot['kind']
++            if story_uses_opening_frame(context) and not context['video_direction'].get('presenter'):
++                # This route adopts narration prose. Supplied narration may
++                # guide rhythm, but should not make an on-screen actor speak.
++                # Fixed/manual shots and resumable work retain their explicit choice.
++                shot['reference_audio_lipsync'] = False
+         shots = normalize_shots(planned, scenes)
+         if not is_medical(context):
+             shots = enforce_opening_motion(shots)
+@@ -379,6 +440,10 @@
+                 shot.update(action='', reference_ids=update.get('reference_ids', []),
+                             visual_description=update.get('visual_description', ''),
+                             visual_design=update.get('visual_design', {}))
++                if cast is not None:
++                    shot['cast_plan'] = validate_cast_plan(cast, update.get('cast_plan'))
++                else:
++                    shot.pop('cast_plan', None)
+                 if shot.get('design_needs_review'):
+                     shot['intent'] = update['intent']
+                     shot['semantic'] = update.get('semantic', {})
+@@ -422,6 +487,25 @@
+                     progress(f"镜头 {shot['id']}：核心画面草案存在文字交接差异，交由图像定稿整理并核对。")
+             mark_complete(needed, 'motion')
+             preserve(f'动态过程设计 {offset+1}～{offset+len(batch)}', batch, offset)
++        needed = pending(batch, 'renderability')
++        if needed and story_uses_opening_frame(context):
++            from .video_renderability import ensure_renderable
++            progress('独立审查：核对分身、年龄、接触动作和单镜时空，风险设计先修订再出图。')
++            def save_renderability(review):
++                state.setdefault('renderability_reviews', []).append(copy.deepcopy(review))
++                persist_state('故事镜头可生成性审查')
++            reviewed = ensure_renderable(context, scenes, needed, references,
++                progress=progress, save_review=save_renderability)
++            updates = {row['id']: row for row in reviewed}
++            for index, shot in enumerate(batch):
++                if shot['id'] in updates:
++                    updated = updates[shot['id']]
++                    if updated != shot:
++                        for phase in ('image', 'video'):
++                            completed[phase] = [identity for identity in completed.get(phase, []) if identity != shot['id']]
++                    batch[index] = updated
++            mark_complete(needed, 'renderability')
++            preserve(f'可生成性审查 {offset+1}～{offset+len(batch)}', batch, offset)
+         def accept_prompts(rows, field, stage):
+             updates = {row['id']: row for row in rows}
+             for shot in batch:

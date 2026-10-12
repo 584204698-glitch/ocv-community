@@ -1,0 +1,21 @@
+--- a/backend/app/auth.py
++++ b/backend/app/auth.py
+@@ -7,6 +7,7 @@
+ import hmac
+ import json
+ import os
++import re
+ import time
+ from typing import Any
+ 
+@@ -15,7 +16,9 @@
+ from .db import get_user_by_id
+ 
+ 
+-COOKIE_NAME = "voice_video_session"
++COOKIE_NAME = os.getenv("OCV_SESSION_COOKIE_NAME", "voice_video_session").strip()
++if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,79}", COOKIE_NAME):
++    raise ValueError("Invalid OCV_SESSION_COOKIE_NAME")
+ SESSION_TTL_SECONDS = 60 * 60 * 24 * 14
+ SESSION_SECRET = os.getenv("SESSION_SECRET", "voice-over-video-local-session-secret")
+ AUTH_MODE = os.getenv("AUTH_MODE", "account").strip().lower()

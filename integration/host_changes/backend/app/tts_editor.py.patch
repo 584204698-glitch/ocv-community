@@ -1,0 +1,63 @@
+--- a/backend/app/tts_editor.py
++++ b/backend/app/tts_editor.py
+@@ -94,6 +94,19 @@
+     """Seal one complete, mutually consistent subtitle timeline for the next stage."""
+     subtitle_path = project_dir / "other" / SUBTITLE_FILENAME
+     timeline_path = project_dir / "other" / TIMELINE_FILENAME
++    entries = _srt_entries(subtitle_path)
++    if not entries:
++        raise ValueError("精修后的最终字幕为空，无法重建时间轴")
++    from .subtitle_timing import bound_subtitle_times, wav_duration
++    audio_path = project_dir / 'input' / '配音.wav'
++    bounded = bound_subtitle_times(entries, wav_duration(audio_path))
++    if bounded != entries:
++        # Recover old ASR end-time overhangs through the normal review/sync
++        # operation. Keep the exact source SRT before changing timing.
++        backup = subtitle_path.with_name('字幕时间修复前-' + uuid.uuid4().hex + '.srt')
++        shutil.copy2(subtitle_path, backup)
++        _write_srt_entries(subtitle_path, bounded)
++        entries = bounded
+     old: list[dict[str, Any]] = []
+     if timeline_path.is_file():
+         raw = json.loads(timeline_path.read_text(encoding="utf-8"))
+@@ -309,6 +322,9 @@
+ 
+     for index, text in reading_texts.items():
+         chunks = [text]
++        if engine == "qwen3_local":
++            from module1_agent_director import dynamic_chunk_text
++            chunks = dynamic_chunk_text(text, min_len=40, max_len=180, measure=len)
+         if token_count is not None:
+             from .tts_segmentation import segment_indextts25_text
+ 
+@@ -748,7 +764,9 @@
+             ]
+             if user_id:
+                 command.extend(["--user-id", str(user_id)])
+-            if engine == "qwen":
++            if engine == "qwen3_local":
++                command.extend(["--tts-voice-id", str(manifest.get("tts_voice_id") or "")])
++            elif engine == "qwen":
+                 command.extend(["--qwen-voice", str(manifest.get("qwen_voice") or "Elias")])
+                 instructions = str(manifest.get("qwen_instructions") or "").strip()
+                 if instructions:
+@@ -1220,6 +1238,8 @@
+                 if compact(old_display) != compact("".join(display_texts)):
+                     raise ValueError("调整断点不能增加、删除或改写字幕文字")
+                 engine = str(manifest.get("engine") or "indextts25")
++                if engine == "qwen3_local" and any(len(text) > 180 for text in reading_texts):
++                    raise ValueError("本地 Qwen 的单段配音请保持在 180 字以内，可增加断句后继续。")
+                 if engine in {"indextts2", "indextts25", "cluster"}:
+                     from .tts_segmentation import INDEXTTS25_SEGMENT_MAX_TOKENS, build_indextts25_token_counter
+                     count = build_indextts25_token_counter()
+@@ -1621,7 +1641,9 @@
+             ]
+             if user_id:
+                 command.extend(["--user-id", str(user_id)])
+-            if engine == "qwen":
++            if engine == "qwen3_local":
++                command.extend(["--tts-voice-id", str(settings_override.get("tts_voice_id") or manifest.get("tts_voice_id") or "")])
++            elif engine == "qwen":
+                 command.extend(["--qwen-voice", str(manifest.get("qwen_voice") or "Elias")])
+                 instructions = str(manifest.get("qwen_instructions") or "").strip()
+                 if instructions:

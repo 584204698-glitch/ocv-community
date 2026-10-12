@@ -1,102 +1,17 @@
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.venv-tests/
-.DS_Store
-.idea/
-.vscode/
-.codex_doc_review/
-.tmp_diagnostic_*/
-.tmp_diag_*/
-.release_staging/
-/support_patches/
-/test/
-/tmp/
-/frontend/tmp/browser-acceptance/
-/tests/test_support_patch_bea5891d5a6b.py
-
+.venv*/
 .env
 .env.*
-!.env.example
-.cloud_sessions.json
-.cloud_sessions.json.tmp
 .session-secret
-
-node_modules/
-frontend/node_modules/
-frontend/dist/
-
-workspace/
-models/
-runtime/
-runtime_logs/
-Archives/
-output/
-TTS_Output/
-saved_parameters/
-saved_agent_prompts/
-Vocal/
-# Keep source-deployment helper scripts in Git. Bundled FFmpeg, IndexTTS-2.5
-# checkpoints and other portable binaries stay in the downloadable package.
-tools/*
-!tools/portable_preflight.py
-!tools/local_service_watchdog.py
-!tools/create_portable_archive.py
-!tools/release_integrity.py
-!tools/portable_release_audit.py
-!tools/publish_launcher_release.py
-!tools/deploy_indextts25.ps1
-!tools/build_comfyui_component.py
-!tools/validate_comfyui_component.py
-!tools/prepare_model_library.py
-Sound Material/
-测试文案/
-venv_audio_vedio/
-launcher/bin/
-launcher/ui-preview.png
-/OCV_Launcher.pre*.running.exe
-.agents/*
-!.agents/skills/
-.agents/skills/*
-!.agents/skills/ocv-generate-test-scripts/
-!.agents/skills/ocv-generate-test-scripts/**
-
+**/runtime/
+**/models/
+**/node_modules/
+**/workspace/
+**/config.private.json
+*.zip
 *.log
-*.mp4
-*.mp3
 *.wav
-*.pt
-*.pth
-*.ckpt
+*.mp3
+*.mp4
 *.safetensors
-
-# Local distributable package; source remains in the repository, archives do not.
-/indexTTS2_standalone_package.zip
-/One-click vidgen/
-/OneClickVidgen/
-
-# Root-level scripts and media used as local generation inputs.
-/*.txt
-!/requirements.txt
-/*.zip
-
-# Private project notes kept only on the maintainer's local machine.
-/Codex项目记忆备份_*.md
-/技术架构与实现总览_*.md
-/默认模式完整技术路线_*.md
-/更新日志_*.md
-/launcher/UPDATE_SOURCE_INTEGRATION.md
-/deploy/content_guard/
-
-# Maintainer-only optional director content.
-/plugins/private_*/
-
-# Local redistribution review bundle; never publish implicitly.
-/local_integration_bundle_*/
-
-# Optional component binaries and third-party nodes are distributed separately.
-/comfyui/*
-!/comfyui/README.md
-/tts/*
-!/tts/README.md
-!tools/migrate_optional_components.ps1

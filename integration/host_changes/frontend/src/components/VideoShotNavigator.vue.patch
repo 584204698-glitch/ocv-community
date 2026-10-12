@@ -1,0 +1,21 @@
+--- a/frontend/src/components/VideoShotNavigator.vue
++++ b/frontend/src/components/VideoShotNavigator.vue
+@@ -1,6 +1,6 @@
+ <script setup>
+ import {computed,ref} from 'vue'
+-const props=defineProps({shots:{type:Array,default:()=>[]},sceneAssets:{type:Array,default:()=>[]},selected:Number,imageUrl:Function,motion:Boolean,statusLabel:Function,hasWarning:Function})
++const props=defineProps({sceneAssets:{type:Array,default:()=>[]},shots:{type:Array,default:()=>[]},selected:Number,imageUrl:Function,motion:Boolean,statusLabel:Function,hasWarning:Function,disabled:Boolean})
+ const emit=defineEmits(['select'])
+ const filter=ref('all')
+ const rows=computed(()=>props.shots.map((shot,index)=>({shot,index})).filter(({shot})=>filter.value==='all'||(filter.value==='attention'?(props.hasWarning?.(shot)||['failed','unknown'].includes(shot.video_status)||shot.image_status==='failed'):shot.kind===filter.value)))
+@@ -10,8 +10,8 @@
+   <div class="navigator-heading"><strong>镜头列表</strong><span>{{shots.length}} 镜</span></div>
+   <select v-model="filter" aria-label="筛选镜头"><option value="all">全部镜头</option><option value="video">动态镜头</option><option value="static">静态镜头</option><option value="attention">需要留意</option></select>
+   <div class="navigator-list">
+-   <button v-for="(asset,index) in sceneAssets" :key="asset.id" type="button" :class="{active:selected===-index-1}" @click="emit('select',-index-1)"><img v-if="asset.image_status==='completed'" :src="imageUrl(asset)" alt=""><span v-else class="thumbnail-placeholder">场景</span><div class="shot-copy"><b>场景 {{index+1}}</b><span class="shot-intent">{{asset.name}}</span><small>参考资产 · 不占视频时长</small></div></button>
+-   <button v-for="{shot,index} in rows" :key="shot.id" type="button" :aria-current="selected===index?'true':undefined" :class="{active:selected===index,'pending-design':shot.design_needs_review,'queue-shot':shot.video_queued||shot.video_waiting,'running-shot':shot.video_status==='running',warning:hasWarning?.(shot)||['failed','unknown'].includes(shot.video_status)||shot.image_status==='failed'}" @click="emit('select',index)">
++   <button v-for="(asset,index) in sceneAssets" :key="asset.id" type="button" :disabled="disabled" :class="{active:selected===-index-1}" @click="emit('select',-index-1)"><img v-if="asset.image_status==='completed'" :src="imageUrl(asset)" alt=""><span v-else class="thumbnail-placeholder">场景</span><div class="shot-copy"><b>场景 {{index+1}}</b><span class="shot-intent">{{asset.name}}</span><small>参考资产 · 不占视频时长</small></div></button>
++   <button v-for="{shot,index} in rows" :key="shot.id" type="button" :disabled="disabled" :aria-current="selected===index?'true':undefined" :class="{active:selected===index,'pending-design':shot.design_needs_review,'queue-shot':shot.video_queued||shot.video_waiting,'running-shot':shot.video_status==='running',warning:hasWarning?.(shot)||['failed','unknown'].includes(shot.video_status)||shot.image_status==='failed'}" @click="emit('select',index)">
+     <img v-if="shot.image_status==='completed'&&imageUrl" :src="imageUrl(shot)" loading="lazy" alt=""><span v-else class="thumbnail-placeholder">{{String(index+1).padStart(2,'0')}}</span>
+     <div class="shot-copy"><b>{{String(index+1).padStart(2,'0')}} <small>{{shot.kind==='video'?'动态':'静态'}}</small></b><small v-if="shot.design_needs_review" class="design-review-label">已变动，待确认</small><small v-else-if="shot.design_review_confirmed">修改已确认</small><time>{{shot.start.toFixed(1)}}–{{shot.end.toFixed(1)}}s</time><span class="shot-intent">{{shot.intent||'待设计镜头'}}</span><em v-if="motion">{{statusLabel?.(shot)}}</em><em v-else-if="hasWarning?.(shot)">待核对</em><em v-else-if="shot.image_status==='failed'">图片生成失败</em></div>
+    </button>

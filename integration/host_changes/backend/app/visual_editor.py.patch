@@ -1,0 +1,19 @@
+--- a/backend/app/visual_editor.py
++++ b/backend/app/visual_editor.py
+@@ -49,6 +49,16 @@
+     @staticmethod
+     def output_dir(job_id: str, user_id: int) -> Path:
+         root = OUTPUT_DIR.resolve()
++        from .pipeline import store
++        job = store.get(job_id)
++        source_name = str((job.request if job else {}).get('_dynamic_audio_source_dir') or '')
++        if job and source_name:
++            source = (root / source_name).resolve()
++            if (str(job.user_id) != str(user_id) or not job.request.get('dynamic_video')
++                    or Path(source_name).name != source_name or source.parent != root
++                    or not source.is_dir()):
++                raise FileNotFoundError('原配音编辑目录不可用，请保留已有成片并检查来源素材')
++            return source
+         for asset in list_media_assets(user_id=user_id, generation_job_id=job_id):
+             if str(asset.get("role") or "") != "project_output":
+                 continue

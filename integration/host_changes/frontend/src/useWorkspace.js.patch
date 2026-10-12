@@ -1,0 +1,924 @@
+--- a/frontend/src/useWorkspace.js
++++ b/frontend/src/useWorkspace.js
+@@ -2,6 +2,9 @@
+ import { api } from './api'
+ import { visualPresentation, hydrateVideoPresentation } from './videoPresentation'
+ import { normalizeDynamicTextMode } from './dynamicTextMode'
++import { dynamicPacingSummary } from './dynamicPacing.js'
++import { restoreStoryProvenance } from './storyProvenance.js'
++import { projectCastBindingError, projectCastBindingPayload, restoreProjectCastBindings } from './projectCastBindings.js'
+ import { readCloudPoolPreference, saveCloudPoolPreference, workspaceParameters } from './cloudPoolPreference'
+ import { imageChoice, imageSize } from './icanImageSizes'
+ 
+@@ -177,6 +180,7 @@
+   indextts25: '本地 GPU · IndexTTS-2.5',
+   cluster: '集群 GPU',
+   qwen: 'Qwen-TTS',
++  qwen3_local: 'Qwen3-TTS · 固定音色',
+ }[ttsEditor.value.engine] || '配音引擎'))
+ const ttsRefinementActive = computed(() => visualEditorOpen.value && Boolean(ttsEditor.value.available))
+ const ttsSegmentPlayingIndex = ref(0)
+@@ -242,6 +246,49 @@
+ const followLiveJob = ref(true)
+ const module1Job = ref(null)
+ const subtitleJob = ref(null)
++let projectRequestEpoch = 0
++let workspaceDisposed = false
++const projectRequestVersions = new Map()
++let settingsRequestVersion = 0
++let refreshInFlight = null
++let ttsStatusInFlight = null
++let visualStatusInFlight = null
++
++function projectAccountId() {
++  return String(session.value.user?.id ?? '')
++}
++
++function beginProjectRequest(channel, jobId = '', currentJobId = null) {
++  const epoch = projectRequestEpoch
++  const accountId = projectAccountId()
++  const version = (projectRequestVersions.get(channel) || 0) + 1
++  projectRequestVersions.set(channel, version)
++  return {
++    jobId,
++    isCurrent: () => !workspaceDisposed
++      && epoch === projectRequestEpoch
++      && accountId === projectAccountId()
++      && version === projectRequestVersions.get(channel)
++      && (!currentJobId || String(currentJobId() || '') === String(jobId)),
++  }
++}
++
++// Navigation releases browser requests and locks, never the backend task.
++// The epoch also distinguishes A -> B -> A, where the final job ID is equal.
++function invalidateProjectRequests() {
++  projectRequestEpoch += 1
++  projectRequestVersions.clear()
++  stopTtsEditorPolling()
++  stopVisualEditorTaskPolling()
++  visualEditorLoading.value = false
++  ttsEditorLoading.value = false
++  guidedSubtitleLoading.value = false
++  guidedSubtitleSaving.value = false
++  submitting.value = false
++  submittingModule1.value = false
++  submittingSubtitle.value = false
++}
++
+ const jobs = ref([])
+ const jobPage = ref(1)
+ const jobTotal = ref(0)
+@@ -530,6 +577,11 @@
+ const form = reactive({
+   project_name: randomProjectName(),
+   script: '',
++  story_source: null,
++  _story_adopted_text: '',
++  _story_requirements: '',
++  _story_title: '',
++  _story_project_handoff: null,
+   content_mode: 'urban_suspense',
+   director_strategy: 'stable',
+   scene_references_enabled: true,
+@@ -563,10 +615,16 @@
+   bgm_fade_duration: 1,
+   step_mode: false,
+   dynamic_video: false,
++  speech_mode: 'narration',
++  dialogue_route: 'external_tts',
++  dialogue_tts_engine: 'indextts25',
++  native_duration_seconds: null,
++  native_minimum_shots: null,
+   dynamic_auto_advance: false,
+   dynamic_text_mode: 'visual_first',
+   video_generation_backend: 'api',
+   comfyui_profile_id: '',
++  comfyui_steps: 8, comfyui_width: null, comfyui_height: null,
+   comfyui_h3_prompt_agent: false,
+   comfyui_reference_audio: false,
+   presenter_mode: false,
+@@ -582,6 +640,7 @@
+   global_character_prompt: '',
+   protagonist_reference_image_id: '',
+   reference_image_ids: [],
++  project_cast_bindings: [],
+   reference_image_notes: {},
+   reference_image_labels: {},
+   reference_image_kinds: {},
+@@ -754,6 +813,7 @@
+ }
+ 
+ const visualPacingSummary = computed(() => {
++  if (form.dynamic_video) return dynamicPacingSummary(form)
+   const defaults = visualPacingDefaults()
+   const labels = {
+     auto: '自动', slow: '舒缓', standard: '标准', fast: '紧凑', custom: '自定义',
+@@ -831,11 +891,13 @@
+   indextts25: 'IndexTTS-2.5 · 本地 GPU',
+   cluster: '集群 GPU',
+   qwen: 'Qwen-TTS · 云端 API',
++  qwen3_local: 'Qwen3-TTS · 本地固定音色',
+ }[ttsEngine.value] || '配音引擎'))
+ const ttsEngineProviderLabel = computed(() => ({
+   indextts25: settings.value.tts?.model || 'official IndexTTS-2.5 · local BF16',
+   cluster: cloudSession.value.base_url || 'cloud-api / Ray 集群',
+   qwen: 'DashScope / 百炼',
++  qwen3_local: '工作站生成 · 已采用声音持续复用',
+ }[ttsEngine.value] || ''))
+ const activeRemoteCloudVoices = computed(() => cloudVoices.value.filter((voice) => voice?.status === 'active'))
+ const cloudPresetVoiceOptions = computed(() => activeRemoteCloudVoices.value.filter((voice) => voice.type === 'preset'))
+@@ -1010,6 +1072,16 @@
+     return block('JOB_RUNNING', '任务运行中，请等待或先停止。')
+   }
+   if (!form.project_name.trim()) return block('PROJECT_NAME_REQUIRED', '请先填写项目名称。')
++  if (form.dynamic_video && ['dialogue','mixed'].includes(form.speech_mode)) {
++    if (!form.script || form.script.trim().length < 20 || form.script.length > 16000) return block('STORY_REQUIRED', '请输入20至16000字的完整故事。')
++    if (!form.visual_style_prompt?.trim()) return block('STYLE_REQUIRED', '请先选择作品画风。')
++    if (form.video_generation_backend !== 'comfyui' || !form.comfyui_profile_id) return block('H3_REQUIRED', '请先选择支持角色音色参考的 H3 多参工作流。')
++    return null
++  }
++  if (form.dynamic_video && !form._rerun_source_project) {
++    const castError = projectCastBindingError(form.project_cast_bindings, form.reference_image_ids)
++    if (castError) return block('PROJECT_CAST_INVALID', castError)
++  }
+   if (String(form.script || '').length > MAX_SCRIPT_CHARACTERS) {
+     return block('SCRIPT_TOO_LONG', `文案超过 ${MAX_SCRIPT_CHARACTERS.toLocaleString('zh-CN')} 字，请缩短后再生成。`)
+   }
+@@ -1026,8 +1098,16 @@
+       ? '本地 TTS 基础环境不完整，请重新下载完整的 OCV 整合包。'
+       : '本地 TTS 权重尚未安装，请在声音设置中下载安装，或改用集群/API 配音。')
+   }
++  if (ttsEngine.value === 'indextts25' && Array.isArray(settings.value.tts?.voices)
++      && !settings.value.tts.voices.includes(form.tts_voice_id)
++      && !String(form.tts_voice_id || '').startsWith('upload:')) {
++    return block('INDEXTTS25_VOICE_REQUIRED', '请在声音设置中采用一个 Qwen 设计音色，或上传参考音频；当前默认音色不可用。')
++  }
+   if (ttsEngine.value === 'qwen' && !apiKeyStatus.value.qwen_tts?.configured) {
+     return block('QWEN_API_KEY_REQUIRED', '请先保存 Qwen-TTS API Key。')
++  }
++  if (ttsEngine.value === 'qwen3_local' && !/^qwen3:[a-f0-9]{32}$/.test(form.tts_voice_id||'')) {
++    return block('QWEN3_VOICE_REQUIRED', '请在声音设置中设计并采用一个声音。')
+   }
+   if (ttsEngine.value === 'qwen' && !qwenSelectedVoiceSupportsInstructions.value && form.qwen_tts_instructions.trim()) {
+     return block('QWEN_INSTRUCTIONS_UNSUPPORTED', '当前 Qwen 音色不支持配音描述，请清空描述或更换音色。')
+@@ -1048,6 +1128,7 @@
+     (ttsEngine.value === 'indextts25' && health.value.tts25_online)
+     || (ttsEngine.value === 'cluster' && cloudReady.value)
+     || (ttsEngine.value === 'qwen' && apiKeyStatus.value.qwen_tts?.configured)
++    || (ttsEngine.value === 'qwen3_local' && /^qwen3:[a-f0-9]{32}$/.test(form.tts_voice_id||''))
+   )
+   && form.project_name.trim()
+   && form.script.trim().length >= 1
+@@ -1136,6 +1217,7 @@
+   if (ttsEngine.value === 'indextts25' && health.value.tts25_online) return 'IndexTTS-2.5 在线'
+   if (ttsEngine.value === 'cluster' && cloudReady.value) return '集群在线'
+   if (ttsEngine.value === 'qwen' && apiKeyStatus.value.qwen_tts?.configured) return 'Qwen 已配置'
++  if (ttsEngine.value === 'qwen3_local') return /^qwen3:[a-f0-9]{32}$/.test(form.tts_voice_id||'')?'已选择固定声音':'请设计或选择声音'
+   if (startingTts.value) return '检测中'
+   if (ttsStartMessage.value) return ttsStartMessage.value
+   return '未连接'
+@@ -1293,19 +1375,41 @@
+ }
+ 
+ async function refresh() {
++  // Slow networks must not let each timer tick invalidate the previous poll
++  // indefinitely. Navigation still permits a fresh pass immediately.
++  if (refreshInFlight?.isCurrent()) return
++  const request = beginProjectRequest('refresh')
++  refreshInFlight = request
++  try {
++    await refreshCurrentWorkspace(request)
++  } finally {
++    if (refreshInFlight === request) refreshInFlight = null
++  }
++}
++
++async function refreshCurrentWorkspace(request) {
+   const previousActiveJob = activeJob.value
+     ? { id: activeJob.value.id, status: activeJob.value.status }
+     : null
+   try {
+-    health.value = await api.health()
++    const payload = await api.health()
++    if (!request.isCurrent()) return
++    health.value = payload
+   } catch {
++    if (!request.isCurrent()) return
+     health.value = { ok: false, tts_online: false, tts25_online: false }
+   }
+   try {
+-    session.value = await api.session()
++    const payload = await api.session()
++    if (!request.isCurrent()) return
++    session.value = payload
+   } catch {
+-    session.value = { user: null, auth_mode: 'account', mysql: {} }
+-  }
++    // A transport failure is not evidence that the account logged out.
++    return
++  }
++  // An account transition invalidates this pass. The next poll starts with
++  // the new account's selection rather than carrying an old selection over.
++  if (!request.isCurrent()) return
+   try {
+     if (!session.value.user) {
+       apiKeyStatusLoaded = false
+@@ -1318,7 +1422,10 @@
+       return
+     }
+     if (!apiKeyStatusLoaded) await loadApiKeySettings()
+-    const payload = await api.jobs(jobPage.value, JOB_PAGE_SIZE)
++    if (!request.isCurrent()) return
++    const page = jobPage.value
++    const payload = await api.jobs(page, JOB_PAGE_SIZE)
++    if (!request.isCurrent() || page !== jobPage.value) return
+     jobs.value = payload.jobs || []
+     jobPage.value = payload.page || 1
+     jobTotal.value = payload.total || 0
+@@ -1326,34 +1433,51 @@
+     const runningJob = jobs.value.find((job) => job.status === 'running')
+     const queuedJob = jobs.value.find((job) => job.status === 'queued')
+     const liveJob = runningJob || queuedJob
+-    if (followLiveJob.value && liveJob?.id) {
+-      activeJob.value = await api.job(liveJob.id)
+-    } else if (activeJob.value?.id) {
+-      await selectJob(activeJob.value.id, false)
+-    } else if (jobs.value.length) {
+-      activeJob.value = jobs.value[0]
+-    }
+-    if (module1Job.value?.id) {
+-      module1Job.value = await api.job(module1Job.value.id)
+-      if (activePage.value === 'module1' && module1Job.value.status === 'completed') {
+-        visualEditorProjectId.value = module1Job.value.id
+-        if (!ttsEditor.value.available || ttsEditor.value.project_id !== module1Job.value.id) await loadTtsEditor()
++    if (!guidedCreatingNew.value) {
++      if (followLiveJob.value && liveJob?.id) {
++        const previousId = activeJob.value?.id
++        const current = await api.job(liveJob.id)
++        if (!request.isCurrent()) return
++        if (!guidedCreatingNew.value && followLiveJob.value && activeJob.value?.id === previousId) activeJob.value = current
++      } else if (activeJob.value?.id) {
++        const jobId = activeJob.value.id
++        const current = await api.job(jobId)
++        if (!request.isCurrent()) return
++        if (!guidedCreatingNew.value && activeJob.value?.id === jobId) activeJob.value = current
++      } else if (followLiveJob.value && jobs.value.length) {
++        activeJob.value = jobs.value[0]
+       }
+     }
+-    if (subtitleJob.value?.id) {
+-      subtitleJob.value = await api.job(subtitleJob.value.id)
++    if (!guidedCreatingNew.value && module1Job.value?.id) {
++      const jobId = module1Job.value.id
++      const current = await api.job(jobId)
++      if (!request.isCurrent()) return
++      if (!guidedCreatingNew.value && module1Job.value?.id === jobId) {
++        module1Job.value = current
++        if (activePage.value === 'module1' && current.status === 'completed') {
++          visualEditorProjectId.value = jobId
++          if (!ttsEditor.value.available || ttsEditor.value.project_id !== jobId) await loadTtsEditor()
++          if (!request.isCurrent()) return
++        }
++      }
++    }
++    if (!guidedCreatingNew.value && subtitleJob.value?.id) {
++      const jobId = subtitleJob.value.id
++      const current = await api.job(jobId)
++      if (!request.isCurrent()) return
++      if (!guidedCreatingNew.value && subtitleJob.value?.id === jobId) subtitleJob.value = current
+     }
+     syncApiRuntimeErrors([...jobs.value, activeJob.value, module1Job.value, subtitleJob.value])
+     await refreshEditor()
++    if (!request.isCurrent()) return
+     handleActiveJobCompletion(previousActiveJob, activeJob.value)
+   } catch {
+-    jobs.value = []
+-    jobTotal.value = 0
+-    jobTotalPages.value = 1
++    // Keep the last known list when a short refresh fails.
+   }
+ }
+ 
+ async function refreshEditor() {
++  const request = beginProjectRequest('refreshEditor')
+   if (!session.value.user) {
+     editorAssets.value = []
+     editorJobs.value = []
+@@ -1361,6 +1485,7 @@
+     return
+   }
+   const [uploadsPayload, jobsPayload] = await Promise.all([api.editorUploads(), api.editorJobs()])
++  if (!request.isCurrent()) return
+   editorAssets.value = uploadsPayload.assets || []
+   editorJobs.value = jobsPayload.jobs || []
+   if (!editorForm.video_id && videoAssets.value[0]) editorForm.video_id = videoAssets.value[0].id
+@@ -1376,6 +1501,7 @@
+   try {
+     session.value = await api.login({ ...loginForm })
+     loginForm.password = ''
++    await loadImageProfiles()
+     await refresh()
+     await refreshParameterPresets()
+     await refreshAgentPromptPresets()
+@@ -1389,6 +1515,7 @@
+   try {
+     session.value = await api.register({ ...registerForm })
+     registerForm.password = ''
++    await loadImageProfiles()
+     await refresh()
+     await refreshParameterPresets()
+     await refreshAgentPromptPresets()
+@@ -2108,8 +2235,10 @@
+ 
+ async function loadApiKeySettings() {
+   if (!session.value.user) return
++  const request = beginProjectRequest('apiKeySettings')
+   try {
+     const payload = await api.apiKeySettings()
++    if (!request.isCurrent()) return
+     apiKeyStatus.value = payload.keys || { language: {}, image: {}, qwen_tts: {} }
+     apiKeyForm.language_provider = apiKeyStatus.value.language?.provider || 'gemini_official'
+     apiKeyForm.language_source = apiKeyStatus.value.language?.source
+@@ -2144,6 +2273,7 @@
+     apiKeyForm.image_total_concurrency = Number(concurrency.total_limit || 3)
+     apiKeyStatusLoaded = true
+   } catch (error) {
++    if (!request.isCurrent()) return
+     apiKeyMessage.value = error.message || '无法读取 API Key 配置状态'
+   }
+ }
+@@ -2252,8 +2382,25 @@
+   }
+ }
+ 
+-async function loadSettings() {
+-  settings.value = await api.settings()
++async function loadSettings({ hydrateForm = true } = {}) {
++  const epoch = projectRequestEpoch
++  const accountId = projectAccountId()
++  const version = ++settingsRequestVersion
++  const isCurrentSettings = () => !workspaceDisposed
++    && accountId === projectAccountId()
++    && version === settingsRequestVersion
++  let payload
++  try {
++    payload = await api.settings()
++  } catch (error) {
++    if (isCurrentSettings()) throw error
++    return false
++  }
++  if (!isCurrentSettings()) return false
++  settings.value = payload
++  // Options belong to the account and remain useful after navigation. Only
++  // initial form defaults belong to the project selection that requested them.
++  if (!hydrateForm || epoch !== projectRequestEpoch) return true
+   const defaults = settings.value.tts?.defaults || {}
+   form.tts_voice_id = defaults.voice_id || 'voice_05.wav'
+   form.tts_speed = defaults.speed ?? 1
+@@ -2295,6 +2442,7 @@
+     || ''
+   applyVisualPacing()
+   rememberVisualPrompt()
++  return true
+ }
+ 
+ async function openPluginsPage() {
+@@ -2461,6 +2609,8 @@
+     const parameters = payload.parameters || {}
+     const autoAnalyzeReferenceImages = form.auto_analyze_reference_images
+     Object.assign(form, workspaceParameters(parameters))
++    form.project_cast_bindings = restoreProjectCastBindings(parameters.project_cast_bindings,
++      parameters.reference_image_ids?.length ? parameters.reference_image_ids : [parameters.protagonist_reference_image_id].filter(Boolean))
+     if (parameters.dynamic_video || Object.hasOwn(parameters, 'dynamic_text_mode')) {
+       form.dynamic_text_mode = normalizeDynamicTextMode(parameters.dynamic_text_mode)
+     }
+@@ -2481,7 +2631,7 @@
+       : 1
+     form.script = typeof parameters.script === 'string' ? parameters.script : ''
+     const savedTtsEngine = parameters.tts_engine === 'indextts2' ? 'indextts25' : parameters.tts_engine
+-    ttsEngine.value = ['indextts25', 'cluster', 'qwen'].includes(savedTtsEngine)
++    ttsEngine.value = ['indextts25', 'cluster', 'qwen', 'qwen3_local'].includes(savedTtsEngine)
+       ? savedTtsEngine
+       : 'indextts25'
+     form.visual_prompt_mode = parameters.visual_prompt_mode === 'full' ? 'full' : 'simple'
+@@ -2954,6 +3104,7 @@
+   }
+   form.reference_image_ids = assetIds
+   form.protagonist_reference_image_id = assetIds[0] || ''
++  form.project_cast_bindings = restoreProjectCastBindings(form.project_cast_bindings, assetIds)
+   protagonistReferenceImageError.value = ''
+   if (!assetIds.length) {
+     referenceImageNames.value = []
+@@ -3050,14 +3201,18 @@
+ 
+ async function loadVisualEditor({ preservePage = false, hydrateBgm = false } = {}) {
+   if (!visualEditorProjectId.value) return
++  const request = beginProjectRequest('visualEditor', visualEditorProjectId.value, () => visualEditorProjectId.value)
+   visualEditorLoading.value = true
+   try {
+-    visualEditor.value = await api.visualEditor(visualEditorProjectId.value)
+-    if (visualPresentation.projectId !== visualEditorProjectId.value || hydrateBgm) {
+-      const project = await api.job(visualEditorProjectId.value)
+-      hydrateVideoPresentation(visualEditorProjectId.value, project.request)
++    const payload = await api.visualEditor(request.jobId)
++    if (!request.isCurrent()) return
++    if (visualPresentation.projectId !== request.jobId || hydrateBgm) {
++      const project = await api.job(request.jobId)
++      if (!request.isCurrent()) return
++      hydrateVideoPresentation(request.jobId, project.request)
+       visualRenderMode.value = project.request?.video_render_variant || 'both'
+     }
++    visualEditor.value = payload
+     if (hydrateBgm) hydrateVisualBgm(visualEditor.value.bgm)
+     if (!preservePage) visualEditorPage.value = 1
+     if (visualEditorPage.value > visualEditorPageCount.value) visualEditorPage.value = visualEditorPageCount.value
+@@ -3072,9 +3227,10 @@
+     }
+     hydrateVisualSubtitleDrafts()
+   } catch (error) {
++    if (!request.isCurrent()) return
+     visualEditor.value = { items: [], task: { status: 'failed', message: error.message || '无法读取画面修改资料' }, version: 0 }
+   } finally {
+-    visualEditorLoading.value = false
++    if (request.isCurrent()) visualEditorLoading.value = false
+   }
+ }
+ 
+@@ -3120,9 +3276,12 @@
+ 
+ async function loadTtsEditor() {
+   if (!visualEditorProjectId.value) return
++  const request = beginProjectRequest('ttsEditor', visualEditorProjectId.value, () => visualEditorProjectId.value)
+   ttsEditorLoading.value = true
+   try {
+-    ttsEditor.value = await api.ttsEditor(visualEditorProjectId.value)
++    const payload = await api.ttsEditor(request.jobId)
++    if (!request.isCurrent()) return
++    ttsEditor.value = payload
+     ttsEditor.value.subtitle_sync_indices = []
+     hydrateTtsRefineSettings(ttsEditor.value)
+     const valid = new Set((ttsEditor.value.segments || []).map((item) => item.index))
+@@ -3134,9 +3293,10 @@
+       ttsPauseDrafts[item.index] = Number(item.pause_after || 0)
+     }
+   } catch (error) {
++    if (!request.isCurrent()) return
+     ttsEditor.value = { available: false, message: error.message || '无法读取逐句配音', segments: [], task: { status: 'failed', message: '' } }
+   } finally {
+-    ttsEditorLoading.value = false
++    if (request.isCurrent()) ttsEditorLoading.value = false
+   }
+ }
+ 
+@@ -3518,8 +3678,12 @@
+   const guidedAudioReview = form.step_mode && guidedStage.value === 'audio_review'
+   const module1Review = activePage.value === 'module1' && module1Job.value?.status === 'completed'
+   if ((!visualEditorOpen.value && !guidedAudioReview && !module1Review) || !visualEditorProjectId.value) return
+-  try {
+-    const payload = await api.ttsEditorStatus(visualEditorProjectId.value)
++  if (ttsStatusInFlight?.isCurrent()) return
++  const request = beginProjectRequest('ttsEditorStatus', visualEditorProjectId.value, () => visualEditorProjectId.value)
++  ttsStatusInFlight = request
++  try {
++    const payload = await api.ttsEditorStatus(request.jobId)
++    if (!request.isCurrent()) return
+     const previous = ttsEditor.value.task?.status
+     ttsEditor.value.task = payload.task || ttsEditor.value.task
+     const persistedRevision = Number(payload.revision || 0)
+@@ -3534,7 +3698,10 @@
+           await Promise.all([loadTtsEditor(), loadGuidedSubtitles()])
+         } else if (module1Review) {
+           await loadTtsEditor()
+-          module1Job.value = await api.job(module1Job.value.id)
++          if (!request.isCurrent() || module1Job.value?.id !== request.jobId) return
++          const current = await api.job(request.jobId)
++          if (!request.isCurrent() || module1Job.value?.id !== request.jobId) return
++          module1Job.value = current
+         } else {
+           await Promise.all([loadTtsEditor(), loadVisualEditor({ preservePage: true })])
+         }
+@@ -3543,6 +3710,8 @@
+     }
+   } catch {
+     // Main job log remains visible if one polling request fails.
++  } finally {
++    if (ttsStatusInFlight === request) ttsStatusInFlight = null
+   }
+ }
+ 
+@@ -3999,8 +4168,12 @@
+ 
+ async function pollVisualEditorTaskStatus() {
+   if (!visualEditorOpen.value || !visualEditorProjectId.value) return
+-  try {
+-    const status = await api.visualEditorStatus(visualEditorProjectId.value)
++  if (visualStatusInFlight?.isCurrent()) return
++  const request = beginProjectRequest('visualEditorStatus', visualEditorProjectId.value, () => visualEditorProjectId.value)
++  visualStatusInFlight = request
++  try {
++    const status = await api.visualEditorStatus(request.jobId)
++    if (!request.isCurrent()) return
+     const previousTask = visualEditor.value.task || {}
+     const nextTask = status.task || previousTask
+     visualEditor.value.task = nextTask
+@@ -4033,7 +4206,8 @@
+       // Refresh only the current job's artifact record. Calling the global
+       // refresh() here could change the user's current workspace/page.
+       try {
+-        const refreshedJob = await api.job(visualEditorProjectId.value)
++        const refreshedJob = await api.job(request.jobId)
++        if (!request.isCurrent()) return
+         if (activeJob.value?.id === refreshedJob.id) activeJob.value = refreshedJob
+         const jobIndex = jobs.value.findIndex((job) => job.id === refreshedJob.id)
+         if (jobIndex >= 0) jobs.value.splice(jobIndex, 1, refreshedJob)
+@@ -4045,11 +4219,14 @@
+         // recover the artifact record if this short request is interrupted.
+       }
+     }
++    if (!request.isCurrent()) return
+     if (!status.has_active_image_tasks && status.task?.status !== 'running') {
+       stopVisualEditorTaskPolling()
+     }
+   } catch {
+     // The main log remains the source of truth if a short status request fails.
++  } finally {
++    if (visualStatusInFlight === request) visualStatusInFlight = null
+   }
+ }
+ 
+@@ -4061,21 +4238,27 @@
+ 
+ async function selectVisualEditorProject() {
+   if (!visualEditorProjectId.value) return
++  const request = beginProjectRequest('selectVisualEditorProject', visualEditorProjectId.value, () => visualEditorProjectId.value)
+   resetTtsSegmentAudio()
+   clearVisualReferenceImages()
+   try {
+-    activeJob.value = await api.job(visualEditorProjectId.value)
++    const payload = await api.job(request.jobId)
++    if (!request.isCurrent()) return
++    activeJob.value = payload
+   } catch {
+     // The editor can still be loaded even if the task list has just refreshed.
+   }
++  if (!request.isCurrent()) return
+   selectedTtsSegmentIndices.value = []
+   await Promise.all([loadVisualEditor({ hydrateBgm: true }), loadTtsEditor()])
+ }
+ 
+ async function toggleVisualEditor() {
+   visualEditorOpen.value = !visualEditorOpen.value
++  const request = beginProjectRequest('toggleVisualEditor')
+   if (visualEditorOpen.value) {
+     const payload = await api.visualEditorProjects()
++    if (!request.isCurrent() || !visualEditorOpen.value) return
+     visualEditorProjects.value = payload.projects || []
+     if (!visualEditorProjectId.value || !visualEditorProjects.value.some((item) => item.id === visualEditorProjectId.value)) {
+       const activeMatch = visualEditorProjects.value.find((item) => item.id === activeJob.value?.id)
+@@ -4438,6 +4621,7 @@
+   delete form.reference_image_labels[removedId]
+   delete form.reference_image_kinds[removedId]
+   form.reference_image_ids = form.reference_image_ids.filter((_, currentIndex) => currentIndex !== index)
++  form.project_cast_bindings = restoreProjectCastBindings(form.project_cast_bindings, form.reference_image_ids)
+   form.protagonist_reference_image_id = form.reference_image_ids[0] || ''
+   referenceImageNames.value = referenceImageNames.value.filter((_, currentIndex) => currentIndex !== index)
+   protagonistReferenceImageError.value = ''
+@@ -4447,6 +4631,8 @@
+   const resolvedCloudVoice = effectiveCloudVoice.value
+   const payload = {
+     ...form,
++    story_source: form.story_source && String(form.script || '').trim() === String(form._story_adopted_text || '').trim()
++      ? { ...form.story_source } : null,
+     tts_engine: ttsEngine.value,
+     tts_emotion: form.tts_emotion || null,
+     tts_pronunciation: form.tts_pronunciation || null,
+@@ -4456,6 +4642,13 @@
+     } : {}),
+   }
+   delete payload.auto_analyze_reference_images
++  delete payload._story_adopted_text
++  delete payload._story_requirements
++  delete payload._story_title
++  delete payload._story_project_handoff
++  delete payload.story_snapshot
++  delete payload.story_handoff
++  delete payload.story_requirements
+   delete payload._rerun_source_project
+   delete payload._rerun_source_revision
+   delete payload._rerun_base
+@@ -4464,6 +4657,8 @@
+   delete payload._rerun_stages
+   delete payload._rerun_return_view
+   delete payload._return_dynamic_stage
++  if (form.dynamic_video) payload.project_cast_bindings = projectCastBindingPayload(form.project_cast_bindings)
++  else delete payload.project_cast_bindings
+   if (!form.dynamic_video) delete payload.dynamic_text_mode
+   // An empty cluster voice is a valid idle UI state, but it must not be sent
+   // to non-cluster jobs where the backend correctly enforces a real voice ID.
+@@ -4479,7 +4674,7 @@
+     ...(form.dynamic_video ? { dynamic_text_mode: form.dynamic_text_mode } : {}),
+     presenter_mode: Boolean(form.dynamic_video&&form.presenter_mode),
+     presenter_reference_id: form.presenter_reference_id||'',
+-    ...(form.dynamic_video ? { video_generation_backend: form.video_generation_backend, comfyui_profile_id: form.comfyui_profile_id, comfyui_h3_prompt_agent: form.comfyui_h3_prompt_agent, comfyui_reference_audio: form.comfyui_h3_prompt_agent ? false : form.comfyui_reference_audio } : {}),
++    ...(form.dynamic_video ? { video_generation_backend: form.video_generation_backend, comfyui_profile_id: form.comfyui_profile_id, comfyui_steps: form.comfyui_steps, comfyui_width: form.comfyui_width, comfyui_height: form.comfyui_height, comfyui_h3_prompt_agent: form.comfyui_h3_prompt_agent, comfyui_reference_audio: form.comfyui_h3_prompt_agent ? false : form.comfyui_reference_audio } : {}),
+     scene_references_enabled: form.scene_references_enabled,
+     auto_split_long_text: form.auto_split_long_text,
+     split_text_threshold: form.split_text_threshold,
+@@ -4527,6 +4722,9 @@
+     if (!(key in form) || key.startsWith('_')) continue
+     form[key] = Array.isArray(value) ? value.map((item) => (typeof item === 'object' ? { ...item } : item)) : value
+   }
++  restoreStoryProvenance(form, job.request)
++  form.project_cast_bindings = restoreProjectCastBindings(job.request.project_cast_bindings,
++    job.request.reference_image_ids?.length ? job.request.reference_image_ids : [job.request.protagonist_reference_image_id].filter(Boolean))
+   ttsEngine.value = job.request.tts_engine === 'indextts2' ? 'indextts25' : (job.request.tts_engine || ttsEngine.value)
+   if (job.request.dynamic_video) form.dynamic_text_mode = normalizeDynamicTextMode(job.request.dynamic_text_mode)
+ }
+@@ -4538,23 +4736,30 @@
+ }
+ 
+ async function loadGuidedSubtitles() {
+-  if (!activeJob.value?.id) return
++  if (!activeJob.value?.id || guidedSubtitleSaving.value) return
++  const request = beginProjectRequest('guidedSubtitlesLoad', activeJob.value.id, () => activeJob.value?.id)
+   guidedSubtitleLoading.value = true
+   try {
+-    const payload = await api.stepWorkflowSubtitles(activeJob.value.id)
++    const payload = await api.stepWorkflowSubtitles(request.jobId)
++    if (!request.isCurrent()) return
+     guidedSubtitles.value = payload.items || []
+     for (const key of Object.keys(guidedSubtitleDrafts)) delete guidedSubtitleDrafts[key]
+     for (const item of guidedSubtitles.value) guidedSubtitleDrafts[item.slide_id] = item.text || ''
+   } catch (error) {
++    if (!request.isCurrent()) return
+     guidedStageError.value = true
+     guidedStageMessage.value = error.message || '无法读取字幕校对资料'
+   } finally {
+-    guidedSubtitleLoading.value = false
++    if (request.isCurrent()) guidedSubtitleLoading.value = false
+   }
+ }
+ 
+ async function saveGuidedSubtitles() {
+-  if (!activeJob.value?.id || !guidedSubtitleDirtyCount.value) return
++  if (!activeJob.value?.id || !guidedSubtitleDirtyCount.value || guidedSubtitleSaving.value) return
++  const request = beginProjectRequest('guidedSubtitlesSave', activeJob.value.id, () => activeJob.value?.id)
++  // A load started before this save must not restore the older subtitle text.
++  beginProjectRequest('guidedSubtitlesLoad')
++  guidedSubtitleLoading.value = false
+   const updates = {}
+   for (const item of guidedSubtitles.value) {
+     const text = String(guidedSubtitleDrafts[item.slide_id] ?? '').trim()
+@@ -4562,16 +4767,18 @@
+   }
+   guidedSubtitleSaving.value = true
+   try {
+-    const payload = await api.saveStepWorkflowSubtitles(activeJob.value.id, updates)
++    const payload = await api.saveStepWorkflowSubtitles(request.jobId, updates)
++    if (!request.isCurrent()) return
+     guidedSubtitles.value = payload.items || []
+     for (const item of guidedSubtitles.value) guidedSubtitleDrafts[item.slide_id] = item.text || ''
+     guidedStageError.value = false
+     guidedStageMessage.value = `已保存 ${Object.keys(updates).length} 句字幕修改。`
+   } catch (error) {
++    if (!request.isCurrent()) return
+     guidedStageError.value = true
+     guidedStageMessage.value = error.message || '字幕修改保存失败'
+   } finally {
+-    guidedSubtitleSaving.value = false
++    if (request.isCurrent()) guidedSubtitleSaving.value = false
+   }
+ }
+ 
+@@ -4620,14 +4827,17 @@
+ }
+ 
+ async function continueGuidedJob(job) {
+-  guidedCreatingNew.value = false
+-  await selectJob(job.id)
++  if (!await selectJob(job.id)) return
++  const request = beginProjectRequest('continueGuidedJob', job.id, () => activeJob.value?.id)
+   form.step_mode = true
+   hydrateGuidedForm(activeJob.value)
+   activePage.value = 'workspace'
+   if (guidedStage.value === 'audio_review') await loadGuidedAudioReview()
++  if (!request.isCurrent()) return
+   if (guidedStage.value === 'visual_setup') await loadGuidedSubtitles()
++  if (!request.isCurrent()) return
+   if (guidedStage.value === 'visual_review') await openGuidedVisualEditor()
++  if (!request.isCurrent()) return
+   window.scrollTo({ top: 0, behavior: 'smooth' })
+ }
+ 
+@@ -4749,53 +4959,80 @@
+   preflightResult.value = null
+ }
+ 
+-async function submit() {
++async function submit({ applyResult = true } = {}) {
+   if (!session.value.user) {
+     authError.value = '请先登录后再生成视频'
+     return
+   }
+   if (!canSubmitGeneration.value) return
++  const request = beginProjectRequest('submit')
++  const parameters = generationRequestPayload()
+   generationSubmitMessage.value = ''
+   prepareCompletionAlerts(true)
+-  followLiveJob.value = true
++  if (applyResult) followLiveJob.value = true
+   submitting.value = true
+   try {
+-    activeJob.value = await api.createJob(generationRequestPayload())
+-    if (form.step_mode) guidedCreatingNew.value = false
++    const payload = await api.createJob(parameters)
++    if (!request.isCurrent()) return payload
++    if (!applyResult) return payload
++    activeJob.value = payload
++    guidedCreatingNew.value = false
+     jobPage.value = 1
+     await refresh()
+-  } catch (error) {
++    return payload
++  } catch (error) {
++    if (!request.isCurrent()) return
+     generationSubmitMessage.value = error.message || '无法创建任务，请稍后重试。'
+   } finally {
+-    submitting.value = false
++    if (request.isCurrent()) submitting.value = false
+   }
+ }
+ 
+ async function selectJob(id, replace = true) {
+-  const payload = await api.job(id)
+-  if (replace) followLiveJob.value = false
+-  if (replace) activeJob.value = payload
+-  else activeJob.value = payload
++  const wasCreatingNew = guidedCreatingNew.value
++  if (replace) {
++    invalidateProjectRequests()
++    followLiveJob.value = false
++    guidedCreatingNew.value = true
++  } else if (guidedCreatingNew.value) return null
++  const request = beginProjectRequest('selectJob', id, replace ? null : () => activeJob.value?.id)
++  let payload
++  try {
++    payload = await api.job(id)
++  } catch (error) {
++    if (request.isCurrent()) {
++      if (replace) guidedCreatingNew.value = wasCreatingNew
++      throw error
++    }
++    return null
++  }
++  if (!request.isCurrent() || (!replace && guidedCreatingNew.value)) return null
++  activeJob.value = payload
+   // Background refreshes also call selectJob(..., false). They must not close
+   // the post-production editor the user is currently working in.
+   if (replace) {
++    guidedCreatingNew.value = false
+     if (payload.request?.module1_only) {
+       module1Job.value = payload
+       activePage.value = 'module1'
+       visualEditorProjectId.value = payload.id
+       await loadTtsEditor()
++      if (!request.isCurrent()) return null
+       window.scrollTo({ top: 0, behavior: 'smooth' })
+-      return
++      return payload
+     }
+     visualEditorOpen.value = false
+     if (isGuidedWorkflowJob(payload) && payload.status !== 'completed') {
+       form.step_mode = true
+       hydrateGuidedForm(payload)
+       if (String(payload.request?._step_mode_stage || '') === 'audio_review') await loadGuidedAudioReview()
++      if (!request.isCurrent()) return null
+       if (String(payload.request?._step_mode_stage || '') === 'visual_setup') await loadGuidedSubtitles()
++      if (!request.isCurrent()) return null
+       if (String(payload.request?._step_mode_stage || '') === 'visual_review') await openGuidedVisualEditor()
+     }
+   }
++  return request.isCurrent() ? payload : null
+ }
+ 
+ async function cancelGeneration() {
+@@ -4827,11 +5064,12 @@
+   }
+ }
+ 
+-async function submitModule1() {
++async function submitModule1({ applyResult = true } = {}) {
+   if (!canSubmitModule1.value) return
++  const request = beginProjectRequest('submitModule1')
+   submittingModule1.value = true
+   try {
+-    module1Job.value = await api.createJob({
++    const payload = await api.createJob({
+       ...generationRequestPayload(),
+       tts_engine: ttsEngine.value,
+       module1_only: true,
+@@ -4841,10 +5079,17 @@
+       tts_emotion: form.tts_emotion || null,
+       tts_pronunciation: form.tts_pronunciation || null,
+     })
++    if (!request.isCurrent()) return payload
++    if (!applyResult) return payload
++    module1Job.value = payload
++    guidedCreatingNew.value = false
+     jobPage.value = 1
+     await refresh()
+-  } finally {
+-    submittingModule1.value = false
++    return payload
++  } catch (error) {
++    if (request.isCurrent()) throw error
++  } finally {
++    if (request.isCurrent()) submittingModule1.value = false
+   }
+ }
+ 
+@@ -4974,11 +5219,12 @@
+   }
+ }
+ 
+-async function submitSubtitleJob() {
++async function submitSubtitleJob({ applyResult = true } = {}) {
+   if (!canSubmitSubtitle.value) return
++  const request = beginProjectRequest('submitSubtitleJob')
+   submittingSubtitle.value = true
+   try {
+-    subtitleJob.value = await api.createJob({
++    const payload = await api.createJob({
+       project_name: subtitleForm.project_name,
+       script: subtitleForm.reference_text,
+       subtitle_only: true,
+@@ -4987,10 +5233,17 @@
+       source_audio_id: subtitleForm.source_audio_id,
+       skip_text_correction: !subtitleForm.use_correction,
+     })
++    if (!request.isCurrent()) return payload
++    if (!applyResult) return payload
++    subtitleJob.value = payload
++    guidedCreatingNew.value = false
+     jobPage.value = 1
+     await refresh()
+-  } finally {
+-    submittingSubtitle.value = false
++    return payload
++  } catch (error) {
++    if (request.isCurrent()) throw error
++  } finally {
++    if (request.isCurrent()) submittingSubtitle.value = false
+   }
+ }
+ 
+@@ -5166,9 +5419,9 @@
+ }
+ 
+ async function selectEditorJob(id, replace = true) {
++  const request = beginProjectRequest('selectEditorJob', id, replace ? null : () => editorJob.value?.id)
+   const payload = await api.editorJob(id)
+-  if (replace) editorJob.value = payload
+-  else editorJob.value = payload
++  if (request.isCurrent()) editorJob.value = payload
+ }
+ 
+ function stepClass(key) {
+@@ -5260,8 +5513,11 @@
+   window.addEventListener('focus', handleCloudRechargeReturnFocus)
+   document.addEventListener('visibilitychange', handleCloudRechargeReturnFocus)
+   try { await loadSettings() } catch { /* The launcher may still be starting. */ }
++  if (workspaceDisposed) return
+   await refresh()
++  if (workspaceDisposed) return
+   await Promise.allSettled([refreshParameterPresets(), refreshAgentPromptPresets(), refreshCloudState(), loadImageProfiles()])
++  if (workspaceDisposed) return
+   timer = window.setInterval(refresh, 2500)
+ })
+ 
+@@ -5307,7 +5563,7 @@
+ watch(
+   () => `${activeJob.value?.id || ''}:${activeJob.value?.request?._step_mode_stage || ''}:${activeJob.value?.status || ''}`,
+   async () => {
+-    if (!isGuidedWorkflowJob(activeJob.value) || !form.step_mode) return
++    if (guidedCreatingNew.value || !isGuidedWorkflowJob(activeJob.value) || !form.step_mode) return
+     hydrateGuidedForm(activeJob.value)
+     if (guidedStage.value === 'audio_review' && activeJob.value?.status === 'waiting_confirmation') {
+       await loadGuidedAudioReview()
+@@ -5320,6 +5576,8 @@
+ )
+ 
+ onUnmounted(() => {
++  workspaceDisposed = true
++  invalidateProjectRequests()
+   if (timer) window.clearInterval(timer)
+   stopVisualEditorTaskPolling()
+   closeVisualBoundaryAlign()
+@@ -5337,5 +5595,5 @@
+   }
+ })
+ 
+-return { cloudRecoveryOpen, openCloudRecovery, closeCloudRecovery, onCloudPasswordReset, computed, onMounted, onUnmounted, reactive, ref, watch, api, VISUAL_PROMPT_FULL_STORAGE_KEY, LOCKED_GENERAL_AGENT2_PROTOCOL, LEGACY_LOCKED_GENERAL_AGENT2_PROTOCOL, EDITABLE_GENERAL_AGENT2_PREFIX, AGENT2_DIRECTOR_THEME_STORAGE_KEY, AGENT2_DIRECTOR_THEME_DEFAULTS, VISUAL_PROMPT_STYLE_STORAGE_KEY, GLOBAL_CHARACTER_STORAGE_KEY, STORY_ENVIRONMENT_STORAGE_KEY, AGENT0_PROMPT_STORAGE_KEY, AGENT1_PROMPT_STORAGE_KEY, VISUAL_PROMPT_MODE_STORAGE_KEY, CONTENT_MODE_STORAGE_KEY, DIRECTOR_STRATEGY_STORAGE_KEY, VISUAL_PACING_STORAGE_KEY, VISUAL_PACING_DEFAULTS, FALLBACK_CONTENT_MODES, randomProjectName, sidebarOpen, activePage, plugins, pluginsLoading, pluginToggling, pluginNotice, pluginMessage, scriptUploadName, scriptUploadError, workspaceScriptTextarea, module1ScriptTextarea, structuralBlankSeconds, sourceAudioName, sourceAudioError, sourceAudioUploading, ttsVoiceUploadName, ttsVoiceUploadError, ttsVoiceUploading, ttsVoicePreviewUrl, ttsVoicePreviewPlaying, ttsVoicePreviewAudio, stepAudioPlayer, stepAudioPlaying, stepAudioCurrentTime, stepAudioDuration, savingStepAudio, stepAudioSaveMessage, retryingTts, guidedAdvancing, guidedCreatingNew, guidedCancelling, guidedStageMessage, guidedStageError, guidedSubtitles, guidedSubtitleDrafts, guidedSubtitleLoading, guidedSubtitleSaving, folderOpenMessage, visualEditorOpen, visualEditorLoading, visualEditor, visualEditorProjects, visualEditorProjectId, visualEditorPage, visualTimingSelectedId, selectedVisualTimingHistory, visualTimingAdjusting, selectedVisualSubtitleHistory, visualSubtitleEditingId, visualSubtitleDrafts, visualSubtitleOriginals, visualSubtitleSaving, visualSubtitleProjectKey, visualSubtitleRemoveDialog, visualBoundaryAlign, visualBoundaryApplying, visualBoundaryAudio, visualBoundaryAudioEnd, ttsEditor, ttsEditorLoading, selectedTtsSegmentIndices, ttsReadingDrafts, ttsPronunciationOpenIndices, ttsBoundary, ttsBoundaryBusy, ttsPauseDrafts, ttsBoundaryPreviewAudio, ttsBoundaryPreviewTimer, ttsRefineForm, ttsRefineVoiceName, ttsRefineVoiceUploading, ttsRefineVoiceError, ttsRefineEngineLabel, ttsRefinementActive, ttsSegmentPlayingIndex, ttsSegmentIsPlaying, ttsSegmentCurrentTime, ttsSegmentDuration, ttsSegmentAudio, visualSelfReferenceMacroId, visualReferenceUploads, visualReferenceUploading, visualReferenceOwnerMacroId, VISUAL_EDITOR_PAGE_SIZE, visualPreviewItem, visualRenderMode, visualBgmUploading, visualBgmError, visualBgm, submitting, preflightRunning, preflightOpen, preflightResult, submittingModule1, submittingSubtitle, cancellingGeneration, resumingGeneration, health, settings, session, authError, activeJob, followLiveJob, module1Job, subtitleJob, jobs, jobPage, jobTotal, jobTotalPages, JOB_PAGE_SIZE, editorAssets, editorJobs, editorJob, uploading, editing, startingTts, ttsStartMessage, showFullLogs, diagnosticExporting, diagnosticMessage, generationSubmitMessage, apiKeyStatus, apiKeyMessage, apiKeyEditing, apiKeyRuntimeErrors, savingApiKeys, deletingApiKey, savingQwenTtsKey, qwenTtsKeyMessage, ttsEngine, localTtsInstallerOpen, localTtsInstallBusy, localTtsInstallError, localTtsComponent, localTtsDownloadedGb, localTtsEstimatedGb, localTtsInstallProgress, openLocalTtsInstaller, closeLocalTtsInstaller, refreshLocalTtsComponent, startLocalTtsInstall, switchToClusterTts, handleTtsEngineChanged, cloudSession, cloudAccount, cloudVoices, cloudVoiceLimits, cloudQuote, cloudBusy, cloudQuoteLoading, cloudVoiceUploading, cloudVoiceDisplayName, cloudVoiceApiAvailable, cloudVoicePreviewLoading, cloudVoicePreviewPlayingId, cloudError, cloudMessage, cloudRechargeOpen, cloudRechargeProducts, cloudRechargeSelectedId, cloudRechargeOrder, cloudRechargePaymentUrl, cloudRechargeLoadingProducts, cloudRechargeBusy, cloudRechargeChecking, cloudRechargeError, cloudRechargeMessage, cloudRechargeSuccess, cloudLoginForm, cloudLoginOpen, cloudVoicePreviewAudio, cloudRechargePollTimer, cloudRechargePollDeadline, cloudRechargeCheckoutWindow, cloudRechargePreviousBodyOverflow, CLOUD_RECHARGE_STORAGE_KEY, qwenVoiceGroups, apiKeyStatusLoaded, timer, visualEditorTaskTimer, ttsEditorTaskTimer, completionAudioContext, completionFlashTimer, completionFlashState, completionFaviconLink, completionFaviconCreated, originalFaviconHref, originalDocumentTitle, lastCompletionAlertAt, MAX_SCRIPT_FILE_SIZE, MAX_SCRIPT_CHARACTERS, insertStructuralBlank, loginForm, registerForm, subtitleForm, subtitleAudioName, subtitleAudioError, subtitleAudioUploading, subtitleReferenceName, subtitleReferenceError, subtitleAddEnabled, subtitleFonts, subtitleFontsLoading, subtitleRenderMessage, subtitleBgmUploading, subtitleBgmError, subtitleRenderForm, subtitleStyleOptions, referenceImageNames, protagonistReferenceImageError, protagonistReferenceUploading, apiKeyForm, savingImageConcurrency, imageConcurrencyPreview, languageProviderOptions, visibleLanguageProviderOptions, currentLanguageProvider, currentLanguageProviderLabel, customLanguageProvider, currentLanguageModels, currentLanguageModelLabel, parameterPresets, selectedParameterPreset, loadingParameterPresets, savingParameterPreset, deletingParameterPreset, parameterPresetMessage, agentPromptPresets, selectedAgentPromptPreset, loadingAgentPromptPresets, savingAgentPromptPreset, bgmUploading, bgmError, bgmPreviewTrack, bgmPreviewAudio, form, contentModeOptions, visualMediumWarning, defaultAgentPromptPresets, userAgentPromptPresets, activeAgent2LockedProtocol, editableVisualPromptSystem, agent2DirectorThemeModel, agent2DirectorThemePlaceholder, visualEditorPageCount, visibleVisualEditorItems, selectedVisualTimingItem, visualSubtitleDirtyIds, visualSubtitleDirtyCount, visualReferenceSummary, contentModeDefaults, modeStorageKey, visualPacingDefaults, applyVisualPacing, visualPacingSummary, editorForm, steps, importantLogPattern, streamingFramePattern, compactStreamingFrameLogs, visibleJobLogs, logText, editorLogText, videoAssets, audioAssets, subtitleAssets, selectedVideoAsset, qwenSelectedVoice, qwenSelectedVoiceSupportsInstructions, ttsEngineLabel, ttsEngineProviderLabel, activeRemoteCloudVoices, cloudPresetVoiceOptions, cloudUploadedVoiceOptions, activeCloudVoices, firstDefaultCloudVoice, selectedCloudVoice, effectiveCloudVoice, previewableCloudPresetVoice, cloudVoicePreviewPlaying, cloudReady, cloudDisplayName, cloudAvailableCredits, cloudRechargeSelectedProduct, cloudRechargeStatusLabel, cloudRechargeStatusDescription, cloudVoiceModel, isGuidedWorkflowJob, guidedStage, guidedRunning, guidedCanStop, guidedCanResume, guidedHasExistingWorkflow, guidedStageSteps, guidedStageGroup, guidedStageOrder, guidedStageChipClass, guidedStageEyebrow, guidedStageTitle, guidedStageDescription, guidedWorkspaceClass, guidedSubtitleDirtyCount, guidedVisualEstimate, pendingGenerationJob, hasPendingGeneration, generationBlockReason, canSubmitGeneration, canSubmitModule1, scriptCharacterCount, scriptTooLong, module1JobRunning, module1ArtifactEntries, module1AudioPreviewUrl, module1LogText, subtitleJobRunning, canSubmitSubtitle, canRenderSubtitleVideo, subtitleLogText, submitButtonText, preflightPassedCount, scriptPlaceholder, canCancelGeneration, canResumeGeneration, canContinueStepMode, stepModeContinueLabel, stepModeAudioUrl, canRetryTts, ttsStatusText, COMPLETION_FAVICON_BLUE, COMPLETION_FAVICON_GREEN, prepareCompletionAlerts, playCompletionSound, stopCompletionFlash, startCompletionFlash, notifyVideoCompleted, handleActiveJobCompletion, apiFailureReason, apiJobKinds, syncApiRuntimeErrors, refresh, refreshEditor, login, register, logout, refreshCloudState, openCloudLogin, loginCloud, registerCloud, logoutCloud, formatCloudRechargeAmount, cloudRechargeProductLabel, stopCloudRechargePolling, clearStoredCloudRecharge, storePendingCloudRecharge, restorePendingCloudRecharge, loadCloudRechargeProducts, openCloudRecharge, closeCloudRecharge, continueCloudRecharge, finishCloudRecharge, openCloudPaymentPage, closeCloudRechargeCheckoutWindow, handleCloudRechargeReturnFocus, scheduleCloudRechargePoll, beginCloudRechargePolling, checkCloudRechargeOrder, startCloudRecharge, selectCloudVoice, stopCloudVoicePreview, toggleCloudVoicePreview, uploadCloudVoice, deleteSelectedCloudVoice, refreshCloudQuote, apiKeyFieldOpen, unlockProtectedInput, editApiKey, onLanguageProviderChanged, onLanguageSourceChanged, onLanguageModelChanged, addApiKeyAccount, deleteConfiguredApiKey, loadApiKeySettings, saveApiKeySettings, saveQwenTtsKey, startTts, loadSettings, openPluginsPage, loadPlugins, togglePlugin, openPluginsFolder, refreshParameterPresets, refreshAgentPromptPresets, loadSelectedAgentPromptPreset, saveCurrentAgentPromptPreset, saveCurrentParameterPreset, loadSelectedParameterPreset, deleteSelectedParameterPreset, formatBgmDuration, readAudioDuration, readAudioUrlDuration, hydrateBgmTrackDurations, bgmTrackUrl, isBgmPreviewing, stopBgmPreview, toggleBgmPreview, moveBgmTrack, clearBgmTracks, uploadVisualBgmTrack, removeVisualBgmTrack, uploadBgmTrack, removeBgmTrack, uploadLocalScript, handleSkipTtsChange, resetVisualPrompt, resetSimpleVisualPrompt, setContentMode, setDirectorStrategy, setVisualPromptMode, rememberVisualPrompt, rememberVisualPacing, uploadTtsVoice, restoreSavedTtsVoiceLabel, stopTtsVoicePreview, toggleTtsVoicePreview, restoreSavedProtagonistReferenceImageLabel, exportDiagnosticPackage, openArtifactFolder, openSubtitleOutputFolder, openProjectOutputFolder, openStepModeVisualPreviewFolder, hydrateVisualBgm, loadVisualEditor, visualSubtitleSentences, hydrateVisualSubtitleDrafts, loadTtsEditor, saveImageConcurrencySettings, hydrateTtsRefineSettings, uploadTtsRefineVoice, resetTtsSegmentAudio, prepareTtsSegmentAudio, toggleTtsSegmentAudio, seekTtsSegmentAudio, isTtsPronunciationOpen, toggleTtsPronunciationEditor, updateTtsReadingDraft, resetTtsReadingDraft, isTtsReadingModified, closeTtsBoundaryEditor, openTtsBoundaryEditor, updateTtsBoundaryParts, confirmTtsHistoryCapacity, refreshTtsBoundaryTokenCounts, ttsBoundaryOverLimit, submitTtsBoundary, saveTtsPause, undoLastTtsEdit, previewTtsBoundary, stopTtsEditorPolling, pollTtsEditorStatus, startTtsEditorPolling, regenerateSelectedTtsSegments, formatTimingRange, formatSubtitleTiming, isVisualSubtitleModified, visualSubtitlePaceWarning, toggleVisualSubtitleEdit, finishVisualSubtitleEdit, resetVisualSubtitleDraft, visualSubtitleHiddenModeLabel, canMergeHiddenSubtitle, openVisualSubtitleRemove, closeVisualSubtitleRemove, hideVisualSubtitle, restoreHiddenVisualSubtitle, saveVisualSubtitles, restoreSelectedVisualSubtitleHistory, hasNextVisualSubtitle, closeVisualBoundaryAlign, previewVisualSubtitleBoundary, formatBoundaryOffset, formatBoundaryDelta, playVisualBoundaryRange, applyVisualSubtitleBoundary, adjustEditedTiming, resetEditedTiming, commitEditedTiming, restoreSelectedVisualTimingHistory, removeEditedTimingPicture, stopVisualEditorTaskPolling, pollVisualEditorTaskStatus, startVisualEditorTaskPolling, selectVisualEditorProject, toggleVisualEditor, redrawVisualImage, beginVisualReferenceSelection, toggleVisualSelfReferenceImage, clearVisualReferenceImages, uploadVisualReferenceImages, uploadVisualImage, undoVisualImage, resetVisualImagePrompt, commitVisualBaseline, commitAllVisualBaselines, renderEditedVideo, cancelVisualRender, uploadSourceAudio, uploadReferenceImages, removeReferenceImage, generationRequestPayload, guidedVisualParameters, guidedRenderParameters, hydrateGuidedForm, loadGuidedAudioReview, loadGuidedSubtitles, saveGuidedSubtitles, formatGuidedTimestamp, openGuidedVisualEditor, advanceGuidedWorkflow, continueGuidedJob, clearGuidedEditingState, returnToFreshGuidedSetup, finishGuidedCancellation, cancelGuidedWorkflow, handleStepModeToggle, enterGuidedPostProduction, runManualPreflight, closePreflight, submit, selectJob, cancelGeneration, deleteGenerationJob, submitModule1, cancelModule1, uploadSubtitleAudio, loadSubtitleReference, loadSubtitleFonts, uploadSubtitleBgmTrack, removeSubtitleBgmTrack, renderSubtitleVideo, submitSubtitleJob, cancelSubtitleJob, syncStepAudioMetadata, syncStepAudioProgress, toggleStepAudioPlayback, seekStepAudio, saveStepAudioAs, formatStepAudioTime, retryTts, resumeGeneration, changeJobPage, uploadAsset, renderEdit, selectEditorJob, stepClass, statusLabel, statusClass, voiceLabel, emotionLabel, artifactLabel, kindLabel }
+-}
++return {imageChoice,imageSize,readCloudPoolPreference,saveCloudPoolPreference,workspaceParameters, invalidateProjectRequests, computed, onMounted, onUnmounted, reactive, ref, watch, api, VISUAL_PROMPT_FULL_STORAGE_KEY, LOCKED_GENERAL_AGENT2_PROTOCOL, LEGACY_LOCKED_GENERAL_AGENT2_PROTOCOL, EDITABLE_GENERAL_AGENT2_PREFIX, AGENT2_DIRECTOR_THEME_STORAGE_KEY, AGENT2_DIRECTOR_THEME_DEFAULTS, VISUAL_PROMPT_STYLE_STORAGE_KEY, GLOBAL_CHARACTER_STORAGE_KEY, STORY_ENVIRONMENT_STORAGE_KEY, AGENT0_PROMPT_STORAGE_KEY, AGENT1_PROMPT_STORAGE_KEY, VISUAL_PROMPT_MODE_STORAGE_KEY, CONTENT_MODE_STORAGE_KEY, DIRECTOR_STRATEGY_STORAGE_KEY, VISUAL_PACING_STORAGE_KEY, VISUAL_PACING_DEFAULTS, FALLBACK_CONTENT_MODES, randomProjectName, sidebarOpen, activePage, plugins, pluginsLoading, pluginToggling, pluginNotice, pluginMessage, scriptUploadName, scriptUploadError, workspaceScriptTextarea, module1ScriptTextarea, structuralBlankSeconds, sourceAudioName, sourceAudioError, sourceAudioUploading, ttsVoiceUploadName, ttsVoiceUploadError, ttsVoiceUploading, ttsVoicePreviewUrl, ttsVoicePreviewPlaying, ttsVoicePreviewAudio, stepAudioPlayer, stepAudioPlaying, stepAudioCurrentTime, stepAudioDuration, savingStepAudio, stepAudioSaveMessage, retryingTts, guidedAdvancing, guidedCreatingNew, guidedCancelling, guidedStageMessage, guidedStageError, guidedSubtitles, guidedSubtitleDrafts, guidedSubtitleLoading, guidedSubtitleSaving, folderOpenMessage, visualEditorOpen, visualEditorLoading, visualEditor, visualEditorProjects, visualEditorProjectId, visualEditorPage, visualTimingSelectedId, selectedVisualTimingHistory, visualTimingAdjusting, selectedVisualSubtitleHistory, visualSubtitleEditingId, visualSubtitleDrafts, visualSubtitleOriginals, visualSubtitleSaving, visualSubtitleProjectKey, visualSubtitleRemoveDialog, visualBoundaryAlign, visualBoundaryApplying, visualBoundaryAudio, visualBoundaryAudioEnd, ttsEditor, ttsEditorLoading, selectedTtsSegmentIndices, ttsReadingDrafts, ttsPronunciationOpenIndices, ttsBoundary, ttsBoundaryBusy, ttsPauseDrafts, ttsBoundaryPreviewAudio, ttsBoundaryPreviewTimer, ttsRefineForm, ttsRefineVoiceName, ttsRefineVoiceUploading, ttsRefineVoiceError, ttsRefineEngineLabel, ttsRefinementActive, ttsSegmentPlayingIndex, ttsSegmentIsPlaying, ttsSegmentCurrentTime, ttsSegmentDuration, ttsSegmentAudio, visualSelfReferenceMacroId, visualReferenceUploads, visualReferenceUploading, visualReferenceOwnerMacroId, VISUAL_EDITOR_PAGE_SIZE, visualPreviewItem, visualRenderMode, visualBgmUploading, visualBgmError, visualBgm, submitting, preflightRunning, preflightOpen, preflightResult, submittingModule1, submittingSubtitle, cancellingGeneration, resumingGeneration, health, settings, session, authError, activeJob, followLiveJob, module1Job, subtitleJob, jobs, jobPage, jobTotal, jobTotalPages, JOB_PAGE_SIZE, editorAssets, editorJobs, editorJob, uploading, editing, startingTts, ttsStartMessage, showFullLogs, diagnosticExporting, diagnosticMessage, generationSubmitMessage, apiKeyStatus, apiKeyMessage, apiKeyEditing, apiKeyRuntimeErrors, savingApiKeys, deletingApiKey, savingQwenTtsKey, qwenTtsKeyMessage, ttsEngine, localTtsInstallerOpen, localTtsInstallBusy, localTtsInstallError, localTtsComponent, localTtsDownloadedGb, localTtsEstimatedGb, localTtsInstallProgress, openLocalTtsInstaller, closeLocalTtsInstaller, refreshLocalTtsComponent, startLocalTtsInstall, switchToClusterTts, handleTtsEngineChanged, cloudSession, cloudAccount, cloudVoices, cloudVoiceLimits, cloudQuote, cloudBusy, cloudQuoteLoading, cloudVoiceUploading, cloudVoiceDisplayName, cloudVoiceApiAvailable, cloudVoicePreviewLoading, cloudVoicePreviewPlayingId, cloudError, cloudMessage, cloudRechargeOpen, cloudRechargeProducts, cloudRechargeSelectedId, cloudRechargeOrder, cloudRechargePaymentUrl, cloudRechargeLoadingProducts, cloudRechargeBusy, cloudRechargeChecking, cloudRechargeError, cloudRechargeMessage, cloudRechargeSuccess, cloudLoginForm, cloudLoginOpen, cloudVoicePreviewAudio, cloudRechargePollTimer, cloudRechargePollDeadline, cloudRechargeCheckoutWindow, cloudRechargePreviousBodyOverflow, CLOUD_RECHARGE_STORAGE_KEY, qwenVoiceGroups, apiKeyStatusLoaded, timer, visualEditorTaskTimer, ttsEditorTaskTimer, completionAudioContext, completionFlashTimer, completionFlashState, completionFaviconLink, completionFaviconCreated, originalFaviconHref, originalDocumentTitle, lastCompletionAlertAt, MAX_SCRIPT_FILE_SIZE, MAX_SCRIPT_CHARACTERS, insertStructuralBlank, loginForm, registerForm, subtitleForm, subtitleAudioName, subtitleAudioError, subtitleAudioUploading, subtitleReferenceName, subtitleReferenceError, subtitleAddEnabled, subtitleFonts, subtitleFontsLoading, subtitleRenderMessage, subtitleBgmUploading, subtitleBgmError, subtitleRenderForm, subtitleStyleOptions, referenceImageNames, protagonistReferenceImageError, protagonistReferenceUploading, apiKeyForm, savingImageConcurrency, imageConcurrencyPreview, languageProviderOptions, visibleLanguageProviderOptions, currentLanguageProvider, currentLanguageProviderLabel, customLanguageProvider, currentLanguageModels, currentLanguageModelLabel, parameterPresets, selectedParameterPreset, loadingParameterPresets, savingParameterPreset, deletingParameterPreset, parameterPresetMessage, agentPromptPresets, selectedAgentPromptPreset, loadingAgentPromptPresets, savingAgentPromptPreset, bgmUploading, bgmError, bgmPreviewTrack, bgmPreviewAudio, form, contentModeOptions, visualMediumWarning, defaultAgentPromptPresets, userAgentPromptPresets, activeAgent2LockedProtocol, editableVisualPromptSystem, agent2DirectorThemeModel, agent2DirectorThemePlaceholder, visualEditorPageCount, visibleVisualEditorItems, selectedVisualTimingItem, visualSubtitleDirtyIds, visualSubtitleDirtyCount, visualReferenceSummary, contentModeDefaults, modeStorageKey, visualPacingDefaults, applyVisualPacing, visualPacingSummary, editorForm, steps, importantLogPattern, streamingFramePattern, compactStreamingFrameLogs, visibleJobLogs, logText, editorLogText, videoAssets, audioAssets, subtitleAssets, selectedVideoAsset, qwenSelectedVoice, qwenSelectedVoiceSupportsInstructions, ttsEngineLabel, ttsEngineProviderLabel, activeRemoteCloudVoices, cloudPresetVoiceOptions, cloudUploadedVoiceOptions, activeCloudVoices, firstDefaultCloudVoice, selectedCloudVoice, effectiveCloudVoice, previewableCloudPresetVoice, cloudVoicePreviewPlaying, cloudReady, cloudDisplayName, cloudAvailableCredits, cloudRechargeSelectedProduct, cloudRechargeStatusLabel, cloudRechargeStatusDescription, cloudVoiceModel, isGuidedWorkflowJob, guidedStage, guidedRunning, guidedCanStop, guidedCanResume, guidedHasExistingWorkflow, guidedStageSteps, guidedStageGroup, guidedStageOrder, guidedStageChipClass, guidedStageEyebrow, guidedStageTitle, guidedStageDescription, guidedWorkspaceClass, guidedSubtitleDirtyCount, guidedVisualEstimate, pendingGenerationJob, hasPendingGeneration, generationBlockReason, canSubmitGeneration, canSubmitModule1, scriptCharacterCount, scriptTooLong, module1JobRunning, module1ArtifactEntries, module1AudioPreviewUrl, module1LogText, subtitleJobRunning, canSubmitSubtitle, canRenderSubtitleVideo, subtitleLogText, submitButtonText, preflightPassedCount, scriptPlaceholder, canCancelGeneration, canResumeGeneration, canContinueStepMode, stepModeContinueLabel, stepModeAudioUrl, canRetryTts, ttsStatusText, COMPLETION_FAVICON_BLUE, COMPLETION_FAVICON_GREEN, prepareCompletionAlerts, playCompletionSound, stopCompletionFlash, startCompletionFlash, notifyVideoCompleted, handleActiveJobCompletion, apiFailureReason, apiJobKinds, syncApiRuntimeErrors, refresh, refreshEditor, login, register, logout, refreshCloudState, openCloudLogin, loginCloud, registerCloud, logoutCloud, formatCloudRechargeAmount, cloudRechargeProductLabel, stopCloudRechargePolling, clearStoredCloudRecharge, storePendingCloudRecharge, restorePendingCloudRecharge, loadCloudRechargeProducts, openCloudRecharge, closeCloudRecharge, continueCloudRecharge, finishCloudRecharge, openCloudPaymentPage, closeCloudRechargeCheckoutWindow, handleCloudRechargeReturnFocus, scheduleCloudRechargePoll, beginCloudRechargePolling, checkCloudRechargeOrder, startCloudRecharge, selectCloudVoice, stopCloudVoicePreview, toggleCloudVoicePreview, uploadCloudVoice, deleteSelectedCloudVoice, refreshCloudQuote, apiKeyFieldOpen, unlockProtectedInput, editApiKey, onLanguageProviderChanged, onLanguageSourceChanged, onLanguageModelChanged, addApiKeyAccount, deleteConfiguredApiKey, loadApiKeySettings, saveApiKeySettings, saveQwenTtsKey, startTts, loadSettings, openPluginsPage, loadPlugins, togglePlugin, openPluginsFolder, refreshParameterPresets, refreshAgentPromptPresets, loadSelectedAgentPromptPreset, saveCurrentAgentPromptPreset, saveCurrentParameterPreset, loadSelectedParameterPreset, deleteSelectedParameterPreset, formatBgmDuration, readAudioDuration, readAudioUrlDuration, hydrateBgmTrackDurations, bgmTrackUrl, isBgmPreviewing, stopBgmPreview, toggleBgmPreview, moveBgmTrack, clearBgmTracks, uploadVisualBgmTrack, removeVisualBgmTrack, uploadBgmTrack, removeBgmTrack, uploadLocalScript, handleSkipTtsChange, resetVisualPrompt, resetSimpleVisualPrompt, setContentMode, setDirectorStrategy, setVisualPromptMode, rememberVisualPrompt, rememberVisualPacing, uploadTtsVoice, restoreSavedTtsVoiceLabel, stopTtsVoicePreview, toggleTtsVoicePreview, restoreSavedProtagonistReferenceImageLabel, exportDiagnosticPackage, openArtifactFolder, openSubtitleOutputFolder, openProjectOutputFolder, openStepModeVisualPreviewFolder, hydrateVisualBgm, loadVisualEditor, visualSubtitleSentences, hydrateVisualSubtitleDrafts, loadTtsEditor, saveImageConcurrencySettings, hydrateTtsRefineSettings, uploadTtsRefineVoice, resetTtsSegmentAudio, prepareTtsSegmentAudio, toggleTtsSegmentAudio, seekTtsSegmentAudio, isTtsPronunciationOpen, toggleTtsPronunciationEditor, updateTtsReadingDraft, resetTtsReadingDraft, isTtsReadingModified, closeTtsBoundaryEditor, openTtsBoundaryEditor, updateTtsBoundaryParts, confirmTtsHistoryCapacity, refreshTtsBoundaryTokenCounts, ttsBoundaryOverLimit, submitTtsBoundary, saveTtsPause, undoLastTtsEdit, previewTtsBoundary, stopTtsEditorPolling, pollTtsEditorStatus, startTtsEditorPolling, regenerateSelectedTtsSegments, formatTimingRange, formatSubtitleTiming, isVisualSubtitleModified, visualSubtitlePaceWarning, toggleVisualSubtitleEdit, finishVisualSubtitleEdit, resetVisualSubtitleDraft, visualSubtitleHiddenModeLabel, canMergeHiddenSubtitle, openVisualSubtitleRemove, closeVisualSubtitleRemove, hideVisualSubtitle, restoreHiddenVisualSubtitle, saveVisualSubtitles, restoreSelectedVisualSubtitleHistory, hasNextVisualSubtitle, closeVisualBoundaryAlign, previewVisualSubtitleBoundary, formatBoundaryOffset, formatBoundaryDelta, playVisualBoundaryRange, applyVisualSubtitleBoundary, adjustEditedTiming, resetEditedTiming, commitEditedTiming, restoreSelectedVisualTimingHistory, removeEditedTimingPicture, stopVisualEditorTaskPolling, pollVisualEditorTaskStatus, startVisualEditorTaskPolling, selectVisualEditorProject, toggleVisualEditor, redrawVisualImage, beginVisualReferenceSelection, toggleVisualSelfReferenceImage, clearVisualReferenceImages, uploadVisualReferenceImages, uploadVisualImage, undoVisualImage, resetVisualImagePrompt, commitVisualBaseline, commitAllVisualBaselines, renderEditedVideo, cancelVisualRender, uploadSourceAudio, uploadReferenceImages, removeReferenceImage, generationRequestPayload, guidedVisualParameters, guidedRenderParameters, hydrateGuidedForm, loadGuidedAudioReview, loadGuidedSubtitles, saveGuidedSubtitles, formatGuidedTimestamp, openGuidedVisualEditor, advanceGuidedWorkflow, continueGuidedJob, clearGuidedEditingState, returnToFreshGuidedSetup, finishGuidedCancellation, cancelGuidedWorkflow, handleStepModeToggle, enterGuidedPostProduction, runManualPreflight, closePreflight, submit, selectJob, cancelGeneration, deleteGenerationJob, submitModule1, cancelModule1, uploadSubtitleAudio, loadSubtitleReference, loadSubtitleFonts, uploadSubtitleBgmTrack, removeSubtitleBgmTrack, renderSubtitleVideo, submitSubtitleJob, cancelSubtitleJob, syncStepAudioMetadata, syncStepAudioProgress, toggleStepAudioPlayback, seekStepAudio, saveStepAudioAs, formatStepAudioTime, retryTts, resumeGeneration, changeJobPage, uploadAsset, renderEdit, selectEditorJob, stepClass, statusLabel, statusClass, voiceLabel, emotionLabel, artifactLabel, kindLabel }
++}
