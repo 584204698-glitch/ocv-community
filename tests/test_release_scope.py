@@ -27,10 +27,11 @@ class ReleaseScopeTests(unittest.TestCase):
         for name in ('integration/host_changes/main.py.patch', 'integration/old.patch',
                      'plugins/ocv_community/maintenance_src/helper.py', 'backend/app/main.py',
                      'plugins/ocv_community/extension_src/backend/app/openai_image_transport.py',
-                     'plugins/ocv_community/extension_src/frontend/src/components/VideoStudio.vue'):
+                     'plugins/ocv_community/extension_src/frontend/src/components/VideoStudio.vue',
+                     'docs/duplicate-guide.md', 'integration/addon-files.txt'):
             with self.subTest(name=name):
                 self.assertTrue(scope.findings(name))
-        for name in ('README.md', 'integration/AUTHOR_GUIDE.md',
+        for name in ('README.md', 'integration/file-map.json',
                      'plugins/ocv_community/extension_src/backend/app/qwen3_local.py'):
             self.assertEqual(scope.findings(name), [])
 

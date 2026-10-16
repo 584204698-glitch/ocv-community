@@ -6,7 +6,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 ROOT_FILES = {'.gitattributes', '.gitignore', 'README.md', 'LICENSE', 'NOTICE', 'AUTHORS.md',
               'ADDITIONAL_TERMS.md', 'TRADEMARKS.md', 'THIRD_PARTY_NOTICES.md'}
-INTEGRATION_FILES = {'AUTHOR_GUIDE.md', 'addon-files.txt', 'file-map.json', 'plugin_api.example.json'}
+INTEGRATION_FILES = {'file-map.json', 'plugin_api.example.json'}
 HOST_FILES = {'backend/app/main.py', 'backend/app/video_studio.py', 'backend/app/image_profiles.py',
               'backend/app/image_studio.py', 'backend/app/gemini_client.py', 'backend/app/codex_bridge.py',
               'backend/app/director_extensions.py', 'frontend/src/Studio.vue',
@@ -20,7 +20,7 @@ def findings(name):
         return [{'file': name, 'rule': 'host_maintenance_not_plugin'}]
     if name in ROOT_FILES:
         return []
-    if path.parts[0] in {'docs', 'tools', 'tests'}:
+    if path.parts[0] in {'tools', 'tests'}:
         return []
     if path.parts[0] == 'integration' and len(path.parts) == 2 and path.name in INTEGRATION_FILES:
         return []

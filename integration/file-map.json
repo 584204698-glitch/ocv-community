@@ -1,6 +1,5 @@
 {
-  "official_commit": "fdb4ba1b880b60d3019f4bf31db2a767fdb897d8",
-  "donor_commit": "4ded43af02ba08afc4837c1be045b950c0ecbe36",
+  "official_commit": "cb8edf14b13c246797b6905dee5afaafce788d6f",
   "files": [
     {
       "kind": "addon",
@@ -933,6 +932,19 @@
           "names": [
             "SequenceMatcher"
           ]
+        }
+      ]
+    },
+    {
+      "kind": "addon",
+      "source": "backend/app/story_structure_evidence.py",
+      "package": "plugins/ocv_community/extension_src/backend/app/story_structure_evidence.py",
+      "sha256": "59be2a9fe38e8b6cc55ce8059415c595f32fa3070cee89aef1cc301c3bce1626",
+      "imports": [
+        {
+          "module": "hashlib",
+          "level": 0,
+          "names": []
         }
       ]
     },
@@ -4806,11 +4818,6 @@
       "sha256": "e5c093d689a1e1ff07a7d2d88693d1ffa7893e831e1e321a372846d32475a626"
     },
     {
-      "source": "frontend/public/style-previews/clay.webp",
-      "package": "plugins/ocv_community/extension_src/frontend/public/style-previews/clay.webp",
-      "sha256": "b821237a70fef3ad8dfd4de394eb39df829f5f5fb866d9e903a5291007f3825c"
-    },
-    {
       "source": "frontend/public/style-previews/crayon-picturebook.webp",
       "package": "plugins/ocv_community/extension_src/frontend/public/style-previews/crayon-picturebook.webp",
       "sha256": "5811acd9cb0845faa5c7870e99b575d90138425a1766878597ae16b04a944fb6"
@@ -4896,11 +4903,6 @@
       "sha256": "0c601004f98bcfc18e71f5ade0d079cc8db8f69766e8fde893d944b5db8df21c"
     },
     {
-      "source": "frontend/public/style-previews/photographic.webp",
-      "package": "plugins/ocv_community/extension_src/frontend/public/style-previews/photographic.webp",
-      "sha256": "d726cdf2b995dbc8c40566d8b9aaeebfb37c2d821e751a88cca2cf546af010c8"
-    },
-    {
       "source": "frontend/public/style-previews/pixel-art.webp",
       "package": "plugins/ocv_community/extension_src/frontend/public/style-previews/pixel-art.webp",
       "sha256": "91da9ac115c14b34171594220a786a835863eeb598f7221503d1a148c725c0eb"
@@ -4923,7 +4925,7 @@
     {
       "source": "frontend/public/style-previews/SOURCES.md",
       "package": "plugins/ocv_community/extension_src/frontend/public/style-previews/SOURCES.md",
-      "sha256": "1c317cddd1c51f3f41902eddc8cca2e3f7eae7519fbc86ce0e0c71be79ddb118"
+      "sha256": "19b0f02197f36f175c3e1eb5a8839fcc905e9d1e1be37621a0b2129ee85b6c54"
     },
     {
       "source": "frontend/public/style-previews/stained-glass.webp",
@@ -4934,11 +4936,6 @@
       "source": "frontend/public/style-previews/transparent-watercolor.webp",
       "package": "plugins/ocv_community/extension_src/frontend/public/style-previews/transparent-watercolor.webp",
       "sha256": "cb1da9805ec3df86d88255ce187ea31911def3f6aff552368b7d36a3a4ae660c"
-    },
-    {
-      "source": "frontend/public/style-previews/watercolor-picturebook.jpg",
-      "package": "plugins/ocv_community/extension_src/frontend/public/style-previews/watercolor-picturebook.jpg",
-      "sha256": "46b49e8b501a2429c75de6c1b5012ad998282152837a357b9b5bba90663678ed"
     },
     {
       "source": "frontend/public/style-previews/woodcut.webp",

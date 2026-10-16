@@ -1,25 +1,6 @@
-# Visual style examples
+# Visual style preview sources
 
-These previews show visual material and character rendering, not the user's
-current film or a generated version of their current story. The photographic and
-clay characters came from authorized 2026-09-28 production trials. The watercolor
-example is an unchanged frame from the authorized 2026-09-30 rabbit picturebook
-production. They do not depict identified real people.
-
-| Asset | Source trial | Original image SHA-256 |
-| --- | --- | --- |
-| `photographic.webp` | T1, convenience-store owner identity reference | `673180784d994bdab413ac54bf09ffc3b5773f27df413ebb4cdbb141ecaa1e6b` |
-| `clay.webp` | T2, lamp repairer identity reference | `3677c4c4a5894dacfde31c0c5fa80840cf52452856ed0294fccd3f8f98899a08` |
-
-Derived with Pillow: fit the full image inside 640 × 640 pixels without cropping,
-convert to RGB and encode WebP at quality 84, method 6. Original images remain
-unchanged. The gallery applies only the visual-style prompt; example identities,
-clothes, project story, audio settings and content mode are not imported.
-
-`watercolor-picturebook.jpg` is copied byte-for-byte from the first approved
-storyboard image of the rabbit picturebook trial (2026-09-30). It retains its
-original 1672 × 941 dimensions; the browser fits the full image without cropping.
-The rabbit is a style example only and is not added to a new project's cast.
+Only standalone synthetic style demonstrations are included. Production-trial portraits and storyboard images are not shipped. These removed legacy files were not used by the selectable catalog; all style choices are preserved.
 
 ## Expanded visual styles (2026-09-30)
 
@@ -49,7 +30,7 @@ Web copies fit the full square image into 512 pixels without cropping; WebP qual
 
 ## Expanded library (28 choices, 2026-09-30)
 
-The three initial rabbit/portrait cards were retired from the selectable catalog at user request. Their files and saved project prompts are retained for compatibility. Eleven new synthetic previews use the same fox/cottage/boat scene as the other seventeen choices. Generated with the previously authorized GPT image API through the unmodified Imagegen CLI: gpt-image-2, 1024 square, low quality. Each has its own full prompt in the validation workspace style-expansion-20260930/prompts.jsonl. Preview scene identity is never part of the selected visual prompt.
+Eleven new synthetic previews use the same fox/cottage/boat scene as the other seventeen choices. Generated with the previously authorized GPT image API through the unmodified Imagegen CLI: gpt-image-2, 1024 square, low quality. Preview scene identity is never part of the selected visual prompt.
 
 | Asset | Original PNG SHA-256 |
 | --- | --- |
