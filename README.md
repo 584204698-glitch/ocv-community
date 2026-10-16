@@ -2,9 +2,11 @@
 
 用户继续使用[官方 OCV](https://github.com/IFRIT-Zhou/One-Click-VidGen)。本仓库只提供附加功能源码、安装辅助和宿主接入说明，不再分发另一套 OCV 主程序。
 
-**当前为开发者接入预览。** 官方 2026.10.12.1 能展示、启停插件清单，但尚不能执行通用 TTS、Agent 或网页插件。安装本包只登记插件，不会自动出现全部增强功能。需要作者接入的地方已列在[作者接入说明](integration/AUTHOR_GUIDE.md)，并提供精确逐文件补丁；普通用户无需自行改主程序。
+**当前为开发者接入预览。** 已核对官方 2026.10.14.1；官方能展示、启停插件清单，并有专门的制作桥，但尚没有执行本包全部 TTS、Agent 和网页扩展的通用钩子。安装本包只登记插件，不会自动出现全部增强功能。需要作者接入的地方见[作者接入说明](integration/AUTHOR_GUIDE.md)。
 
-当前插件接入包：[v0.1.1-plugin-preview 下载](https://github.com/584204698-glitch/ocv-community/archive/refs/tags/v0.1.1-plugin-preview.zip)。主程序请从官方 OCV 获取。
+当前插件接入包：[v0.1.2-plugin-preview 下载](https://github.com/584204698-glitch/ocv-community/archive/refs/tags/v0.1.2-plugin-preview.zip)。主程序请从官方 OCV 获取。
+
+本次新增[2026.10.14.1 通用维护包](integration/maintenance-2026.10.14.1/README.md)：核心图网页重绘取消三图截断，按四张总输入核算，保留已选项；提供独立参考容量模块、固定官方版本补丁与零模型调用验证工具。私人栏目、账号路线、项目、音色资产和运行配置均不在本次公开内容中。维护包需要宿主接入，不会由插件登记器自动覆盖主程序。
 
 ## 附加内容
 
@@ -46,4 +48,4 @@ python tools/check_host.py --ocv-root "C:\OCV"
 
 安装保护、宿主能力检查、附加源码语法、补丁与固定官方基线的对应关系另行验证。此前完整微调版的实片及测试结果不作为本插件已接入官方的证据。
 
-来源官方 2026.10.12.1（`fdb4ba1`），抽取自社区源码 `4ded43a`。沿用 [AGPL-3.0-only](LICENSE)、[附加条款](ADDITIONAL_TERMS.md)、[原作者署名](AUTHORS.md)、[商标规则](TRADEMARKS.md) 和[第三方声明](THIRD_PARTY_NOTICES.md)。社区扩展不代表官方发行。
+历史附加源码以官方 2026.10.12.1（`fdb4ba1`）为基线，抽取自社区源码 `4ded43a`；新增维护补丁单独固定官方 2026.10.14.1（`cb8edf1`），两者不可盲目叠加。沿用 [AGPL-3.0-only](LICENSE)、[附加条款](ADDITIONAL_TERMS.md)、[原作者署名](AUTHORS.md)、[商标规则](TRADEMARKS.md) 和[第三方声明](THIRD_PARTY_NOTICES.md)。社区扩展不代表官方发行。

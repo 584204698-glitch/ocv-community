@@ -1,0 +1,22 @@
+{
+  "official_commit": "cb8edf14b13c246797b6905dee5afaafce788d6f",
+  "official_release": "2026.10.14.1",
+  "files": [
+    {
+      "path": "backend/app/video_studio.py",
+      "before_sha256": "d0d595a7501a805a57bedea78c8443d9a282b315b8810fdc19a9b71e45a90873",
+      "after_sha256": "ddf0a0bd079f75beeba81311bdebd223d86ed4f2d42b6369b9b9846dd88bb0dd"
+    },
+    {
+      "path": "frontend/src/components/VideoStudio.vue",
+      "before_sha256": "e7179e9f70b86fe72c648e799514447d4e8d7f15d7351c718412ce5d3e794900",
+      "after_sha256": "285a91f56e7df253e1754c1fb48a9b99e0e58340ec9dc71610d25d785ff2107a"
+    },
+    {
+      "path": "frontend/src/imageReferenceCapacity.js",
+      "before_sha256": null,
+      "after_sha256": "47317d3ca04ccd354ca5a2a7dd5f2b97a310b202bc874363c15d045216eed34d"
+    }
+  ],
+  "provider_calls": 0
+}
