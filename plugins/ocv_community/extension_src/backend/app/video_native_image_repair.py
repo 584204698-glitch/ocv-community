@@ -137,13 +137,12 @@ def _repair_inputs(path, record, selected, findings, versions, report_fingerprin
     opening = [characters[c['project_character_id']] for c in participants
                if c.get('presence') in {'opening', 'depicted'} and c.get('project_character_id') in characters]
     references = {r['id']: r for r in studio.planning_references(record)}
-    # For identity defects, do not sacrifice any opening character's identity
-    # reference to an optional adjacent frame. The provider accepts four images.
+    # For identity defects, do not sacrifice an opening character's reference
+    # to an optional adjacent frame. Preserve every identity input; the host's
+    # current provider preflight owns image capacity, not this add-on.
     if any(i['code'] in {'cast', 'anatomy'} for i in findings):
         if not opening:
             raise ValueError('本镜角色身份计划缺失，不能自动修复身份或肢体')
-        if len(opening) > 3:
-            raise ValueError('本镜身份修复超出参考图片容量，请人工检查；未提交')
         paths, labels = paths[:1], labels[:1]
         for character in opening:
             asset = references.get(character['reference_id'])

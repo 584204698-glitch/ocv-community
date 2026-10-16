@@ -4,7 +4,6 @@ backend/app/h3_dialogue.py
 backend/app/h3_voice_reference.py
 backend/app/indextts25_token_counter.py
 backend/app/one_click.py
-backend/app/openai_image_transport.py
 backend/app/qwen3_local.py
 backend/app/qwen3_runner.py
 backend/app/qwen_dialogue_synthesis.py
@@ -31,7 +30,6 @@ backend/app/video_environment_audio.py
 backend/app/video_external_alignment.py
 backend/app/video_external_dialogue.py
 backend/app/video_external_narration.py
-backend/app/video_image_outputs.py
 backend/app/video_inputs.py
 backend/app/video_manual_dub.py
 backend/app/video_manual_h3.py

@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "ocv_community",
   "name": "OCV 社区增强（接入预览）",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "584204698-glitch",
   "description": "Qwen音色、故事导演及制作流程增强的附加源码包。当前官方仅展示清单，功能需作者接入宿主接口；详情见README。",
   "type": "placeholder",
