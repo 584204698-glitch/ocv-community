@@ -572,6 +572,85 @@
     },
     {
       "kind": "addon",
+      "source": "backend/app/production_metrics.py",
+      "package": "plugins/ocv_community/extension_src/backend/app/production_metrics.py",
+      "sha256": "884b9394495f0a1eef6a32b02aef3017acfd9e9434e8375deb3ca7e8a5edce24",
+      "imports": [
+        {
+          "module": "contextlib",
+          "level": 0,
+          "names": [
+            "contextmanager"
+          ]
+        },
+        {
+          "module": "contextvars",
+          "level": 0,
+          "names": [
+            "ContextVar"
+          ]
+        },
+        {
+          "module": "functools",
+          "level": 0,
+          "names": [
+            "wraps"
+          ]
+        },
+        {
+          "module": "pathlib",
+          "level": 0,
+          "names": [
+            "Path"
+          ]
+        },
+        {
+          "module": "json",
+          "level": 0,
+          "names": []
+        },
+        {
+          "module": "os",
+          "level": 0,
+          "names": []
+        },
+        {
+          "module": "re",
+          "level": 0,
+          "names": []
+        },
+        {
+          "module": "threading",
+          "level": 0,
+          "names": []
+        },
+        {
+          "module": "time",
+          "level": 0,
+          "names": []
+        },
+        {
+          "module": "uuid",
+          "level": 0,
+          "names": []
+        },
+        {
+          "module": "requests",
+          "level": 0,
+          "names": []
+        },
+        {
+          "module": "gemini_client",
+          "level": 1,
+          "names": [
+            "_provider",
+            "language_model"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "addon",
       "source": "backend/app/qwen3_local.py",
       "package": "plugins/ocv_community/extension_src/backend/app/qwen3_local.py",
       "sha256": "a0b596d6dfe145242cdc3ba6fc88949230addf0a61fa7772bda31891b81987c3",
@@ -4164,10 +4243,58 @@
     },
     {
       "kind": "addon",
+      "source": "backend/app/video_review_execution.py",
+      "package": "plugins/ocv_community/extension_src/backend/app/video_review_execution.py",
+      "sha256": "8838580652c5a2647577d84129aae654e9187674add77b71aa274bed4b43b988",
+      "imports": [
+        {
+          "module": "concurrent.futures",
+          "level": 0,
+          "names": [
+            "ThreadPoolExecutor",
+            "as_completed"
+          ]
+        },
+        {
+          "module": "contextvars",
+          "level": 0,
+          "names": [
+            "copy_context"
+          ]
+        },
+        {
+          "module": "production_metrics",
+          "level": 1,
+          "names": [
+            "production_scope"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "addon",
       "source": "backend/app/video_review_policy.py",
       "package": "plugins/ocv_community/extension_src/backend/app/video_review_policy.py",
       "sha256": "4c3d82380324fcb8dead4396fe9cb8decfb56c65566b6b0ff1ce5d748e44d89e",
       "imports": []
+    },
+    {
+      "kind": "addon",
+      "source": "backend/app/video_review_recovery.py",
+      "package": "plugins/ocv_community/extension_src/backend/app/video_review_recovery.py",
+      "sha256": "65dd37285b97b4bbcac081ab051fab9b438de5f88334e2c19d15e9476772d6c1",
+      "imports": [
+        {
+          "module": "hashlib",
+          "level": 0,
+          "names": []
+        },
+        {
+          "module": "json",
+          "level": 0,
+          "names": []
+        }
+      ]
     },
     {
       "kind": "addon",
@@ -4590,6 +4717,13 @@
       "source": "frontend/src/components/ProductionRecovery.vue",
       "package": "plugins/ocv_community/extension_src/frontend/src/components/ProductionRecovery.vue",
       "sha256": "ab3ced43a6166eed7cc474a546be9da96772473e41bca46a061544ed23bf0a56"
+    },
+    {
+      "kind": "addon",
+      "source": "frontend/src/components/ProductionUsage.vue",
+      "package": "plugins/ocv_community/extension_src/frontend/src/components/ProductionUsage.vue",
+      "sha256": "f4d2b5193bf931798f049568bc282b2255fb8143fa78542d5e26f07e87b9caf0",
+      "imports": []
     },
     {
       "kind": "addon",

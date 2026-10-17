@@ -14,6 +14,7 @@
 | 项目内角色与声音管理 | `backend/app/video_project_cast.py`、`video_dialogue.py`；`frontend/src/components/ProjectVoicePanel.vue` | 已登录用户的项目、角色、声音资产API与修订检查 |
 | 故事创作、审稿、修订与采用稿追踪 | `backend/app/story_workspace.py`、`story_development.py`、`story_audience.py`、`story_genre_profiles.py` | 故事工作台路由、无上下文LLM调用、当前稿版本与采用凭据 |
 | 故事结构的原文证据核对 | `backend/app/story_structure_evidence.py` | 可独立使用的纯函数；接收调用方标注，验证逐字引用、顺序和闭环，返回字符位置与计数，不预测留存或给质量分 |
+| 分阶段调用统计、独立审核并行与失败恢复依据 | `backend/app/production_metrics.py`、`video_review_execution.py`、`video_review_recovery.py`；`frontend/src/components/ProductionUsage.vue` | 宿主模型请求观察钩子、按账号只读用量API、失败回执与显式重试入口；最多两路独立审核，不重写合同或自动重发未知请求 |
 | 多角色对白、独立旁白与音色参考 | `backend/app/h3_dialogue.py`、`video_native_preparation.py`、`video_external_dialogue.py`；`frontend/src/components/DialogueEditor.vue` | 官方H3/音频任务服务、输入回执、说话者及时序，不自行替换模型能力预检 |
 | 一键阶段协调、素材保留与局部恢复 | `backend/app/one_click.py`、`video_review_policy.py`；`frontend/src/productionRecovery.js` | 官方项目阶段、任务生命周期、修订锁与提交回执 |
 | H3手工提示、动态节奏、画风选择 | `frontend/src/components/ManualH3Prompt.vue`、`DynamicPacingSelector.vue`、`VisualStyleGallery.vue` | 官方前端面板插槽与设置服务；已有角色不随选择自动重绘 |
@@ -29,6 +30,8 @@
 4. 继续用官方登录、当前用户权限、资源URL、项目版本和任务回执。逐项验证启停、项目切换、失败恢复和原入口，再把对应功能标为可用。
 
 官方尚缺的接口：可选TTS provider注册、授权资产服务、故事/导演阶段注册、任务生命周期、前端面板注册、导出音轨注册。通用清单不能代替这些执行钩子；当前保持 `placeholder / requires_host_api`，不使用 monkey patch 或其他插件身份绕过加载限制。
+
+调用统计接入：在宿主阶段外包 `production_scope(project_path, stage)`，给现有语言请求加观察器，HTTP发送及供应商usage分别调用计数钩子；模型名称与provider由宿主适配器提供。`summary()`只读升级后的账本，不推算旧账或费用，不包含图片、TTS与视频生成成本。按账号授权后向`ProductionUsage`提供endpoint；不要开放任意路径查询。并行执行器保留ContextVar、返回每个终态，主线程负责保存成功结果；失败不授权重写。复核恢复模块只产生与具体回执绑定的重试依据，宿主仍须执行修订、输入指纹、单次提交与未知结果重复计费确认；调用`recovery()`本身不会重发请求。这些接入要求没有通过宿主差异补丁交付，也不代表安装清单即可生效。
 
 ## 安装辅助
 
@@ -63,5 +66,7 @@ python tools/check_release_privacy.py
 不发布官方核心、宿主差异补丁、旧维护包、测试成片、私人栏目路线与专有提示词、私人项目或媒体、声音资产、权重、密钥和运行配置；不推送私人主程序历史。每个源码文件只保留一个版本，不附重复源码压缩包和过程报告。保留根目录与独立插件包必需的许可证及署名。
 
 0.1.4整理：合并重复说明、删除重复路径表和私人试片预览素材，保留画风选项；新增独立故事证据核对函数。此前0.1.2的宿主维护补丁已撤下，不应套到新版OCV。当前包没有参考图数量替代上限，不发布官方功能的降级副本。
+
+0.1.5增加四个可复用增强源码：调用统计、有限并行执行、复核恢复依据与用量面板。无新增模型依赖，不携带模型权重、运行配置、私人题材或宿主入口替换；实际费用和提速幅度需要接入后的真实任务记录。
 
 许可证：[AGPL-3.0-only](LICENSE)、[附加条款](ADDITIONAL_TERMS.md)、[署名](AUTHORS.md)、[商标规则](TRADEMARKS.md)、[第三方声明](THIRD_PARTY_NOTICES.md)。社区扩展不代表官方发行。
